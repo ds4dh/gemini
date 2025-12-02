@@ -3,9 +3,9 @@ model_path: unsloth/Qwen3-4B-GGUF
 quant_scheme: Q5_K_XL
 enable_thinking: true  # for, e.g., "Qwen-4B", but not "Qwen-4B-Instruct" (never thinks) or "Qwen-4B-Thinking" (always thinks)
 reasoning_parser: qwen3  # deepseek_r1, qwen3, ... /!\ use deepseek_r1 for explicitely thinking models, qwen3 otherwise
-logit_processors:  # null for not using any logit processor
-  - src.models.logit_processors:ThinkingBudgetProcessor
-  - src.models.logit_processors:JSONParsingProcessor
+logits_processors:  # null for not using any logit processor
+  - src.models.logits_processors:ThinkingBudgetProcessor
+  - src.models.logits_processors:JSONParsingProcessor
 max_thinking_tokens: 768  # maximum number of tokens in between <think> and </think>
 output_schema_name: PatientInfoSchema  # null for not using
 
