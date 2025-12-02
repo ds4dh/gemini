@@ -1,0 +1,60 @@
+Bootstrap: docker
+From: nvidia/cuda:12.9.1-cudnn-devel-ubuntu24.04
+
+%files
+    pyproject.toml /opt/pyproject.toml
+
+%environment
+    export LC_ALL=C
+    export PYTHONUNBUFFERED=1
+    # Setting the virtual environment path
+    export VIRTUAL_ENV=/opt/venv
+    export PATH="/opt/venv/bin:$PATH"
+    export PYTHONPATH="${PWD}:${PYTHONPATH}"
+
+%post
+    # Set up permissions inside the container for temporary files
+    chmod 1777 /tmp
+    export DEBIAN_FRONTEND=noninteractive
+
+    # Install system dependencies
+    apt-get update && apt-get install -y --no-install-recommends \
+        python3-pip \
+        python3-venv \
+        python3-dev \
+        git \
+        curl \
+        build-essential \
+        ninja-build \
+        ca-certificates \
+        nvtop \
+        screen
+
+    # Install uv (The Python package manager)
+    curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="/usr/local/bin" sh
+
+    # Create venv at /opt/venv
+    uv venv /opt/venv
+    . /opt/venv/bin/activate
+
+    # Install dependencies from pyproject.toml
+    cd /opt
+    uv pip install -r pyproject.toml --extra dev
+
+%test
+    echo "Running tests..."
+    . /opt/venv/bin/activate
+
+    # Check for crucial packages
+    python3 -c "import torch; print(f'Torch: {torch.__version__}, CUDA: {torch.version.cuda}')"
+    python3 -c "import vllm; print(f'VLLM version: {vllm.__version__}')"
+
+    echo "All tests passed!"
+
+%runscript
+    exec /bin/bash "$@"
+
+%labels
+    Author alban.bornet@unige.ch
+    Version 0.1
+    Description "Container to extract and structure information from clinical text."
