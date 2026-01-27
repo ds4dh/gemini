@@ -48,7 +48,7 @@ def add_data_arguments(parser: ArgumentParser) -> None:
         "--encrypted-data-path",
         "-ed",
         type=str,
-        required=True,
+        default="default_encrypted_data_path.encrypted.csv",
         help="Path to the local encrypted data file.",
     )
 
@@ -56,15 +56,15 @@ def add_data_arguments(parser: ArgumentParser) -> None:
         "--curated-data-path",
         "-cd",
         type=str,
-        required=True,
-        help="Path to the local encrypted data file.",
+        default="default_non_encrypted_data_path.csv"
+        help="Path to the local non-encrypted data file.",
     )
 
     data_group.add_argument(
         "--key-name",
         "-kn",
         type=str,
-        required=True,
+        default="GEMINI",
         help="Name of the encryption key variable in the .env file on the remote server.",
     )
 
@@ -72,7 +72,7 @@ def add_data_arguments(parser: ArgumentParser) -> None:
         "--hostname",
         "-hn",
         type=str,
-        required=True,
+        default="host.name.is.required.com",
         help="Hostname or IP address of the remote server.",
     )
 
@@ -80,7 +80,7 @@ def add_data_arguments(parser: ArgumentParser) -> None:
         "--username",
         "-un",
         type=str,
-        required=True,
+        default="username_is_required",
         help="Username for the SSH connection.",
     )
 
@@ -88,7 +88,7 @@ def add_data_arguments(parser: ArgumentParser) -> None:
         "--remote-env-path",
         "-re",
         type=str,
-        required=True,
+        default="/home/username/project/required/env/path/.env",
         help="Path to the .env file on the remote server.",
     )
 

@@ -4,5 +4,5 @@ data_loading_arguments:
   use_curated_dataset: true  # use only the dataset from 2024 with 50 samples
   add_curated_dataset: false  # add the dataset from 2024 with 50 samples
   remove_samples_without_label: false
-  sample_small_dataset: true
+  sample_small_dataset: false
   min_samples_per_class: 15  # only used is sample_small_dataset is true
