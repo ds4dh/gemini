@@ -56,7 +56,7 @@ def add_data_arguments(parser: ArgumentParser) -> None:
         "--curated-data-path",
         "-cd",
         type=str,
-        default="default_non_encrypted_data_path.csv"
+        default="default_non_encrypted_data_path.csv",
         help="Path to the local non-encrypted data file.",
     )
 
