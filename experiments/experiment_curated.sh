@@ -61,7 +61,7 @@ for MODEL_PATH in "${MODEL_PATHS[@]}"; do
 
         # Run the benchmark with updated configuration
         python -m scripts.run_benchmark \
-            --curated-data-path "./data/patient_data.csv" \
+            --curated-data-path "/data/patient_data.csv" \
             --data-config-path "./configs/data_config.yaml" \
             --model-config-path "./configs/model_config.yaml" \
             --prompt-config-path "./configs/prompt_config.yaml"
