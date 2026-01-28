@@ -14,7 +14,7 @@ fi
 
 # Models and quantizations to test (GGUF)
 MODEL_PATHS=(
-    "unsloth/Qwen3-32B-GGUF"
+    # "unsloth/Qwen3-32B-GGUF"
     "unsloth/Qwen3-8B-GGUF"
     "unsloth/Qwen3-4B-GGUF"
     "unsloth/Qwen3-1.7B-GGUF"
