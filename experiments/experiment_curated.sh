@@ -14,19 +14,19 @@ fi
 
 # Models and quantizations to test (GGUF)
 MODEL_PATHS=(
-    # "unsloth/Qwen3-32B-GGUF"
-    "unsloth/Qwen3-8B-GGUF"
-    "unsloth/Qwen3-4B-GGUF"
-    "unsloth/Qwen3-1.7B-GGUF"
-    "unsloth/Qwen3-0.6B-GGUF"
+    # "unsloth/Qwen3-0.6B-GGUF"
+    # "unsloth/Qwen3-1.7B-GGUF"
+    # "unsloth/Qwen3-4B-GGUF"
+    # "unsloth/Qwen3-8B-GGUF"
+    "unsloth/Qwen3-32B-GGUF"
 )
 QUANT_SCHEMES=(
-    "Q8_0"
-    "Q6_K_XL"
-    "Q5_K_XL"
-    "Q4_K_XL"
-    "Q3_K_XL"
     "Q2_K_XL"
+    "Q3_K_XL"
+    "Q4_K_XL"
+    "Q5_K_XL"
+    "Q6_K_XL"
+    "Q8_0"
 )
 
 # # Models and quantizations to test (AWQ/FP8)
