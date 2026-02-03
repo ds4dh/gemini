@@ -3,7 +3,7 @@
 # Configuration
 CONFIG_FILE="./configs/model_config.yaml"
 INFERENCE_BACKEND="vllm-serve-async"
-GPU_MEM_UTIL="0.90"
+GPU_MEM_UTIL="0.80"
 MAX_CONCURRENT_INFS="64"
 
 # Check if the configuration file exists
