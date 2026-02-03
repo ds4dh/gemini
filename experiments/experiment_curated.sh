@@ -12,38 +12,39 @@ if [ ! -f "$CONFIG_FILE" ]; then
     exit 1
 fi
 
-# Models and quantizations to test (GGUF)
-MODEL_PATHS=(
-    # "unsloth/Qwen3-0.6B-GGUF"
-    # "unsloth/Qwen3-1.7B-GGUF"
-    # "unsloth/Qwen3-4B-GGUF"
-    # "unsloth/Qwen3-8B-GGUF"
-    # "unsloth/Qwen3-32B-GGUF"
-    # "unsloth/Qwen3-30B-A3B-Thinking-2507-GGUF"
-    "unsloth/Qwen3-Next-80B-A3B-Thinking-GGUF"
-    # "unsloth/Qwen3-235B-A22B-Thinking-2507-GGUF"
-)
-QUANT_SCHEMES=(
-    "Q2_K_XL"
-    "Q3_K_XL"
-    "Q4_K_XL"
-    "Q5_K_XL"
-    "Q6_K_XL"
-    "Q8_0"
-)
-
-# # Models and quantizations to test (AWQ/FP8)
+# # Models and quantizations to test (GGUF)
 # MODEL_PATHS=(
-#     Qwen/Qwen3-0.6B-FP8  # (no AWQ version available)
-#     Qwen/Qwen3-1.7B-FP8  # (no AWQ version available)
-#     Qwen/Qwen3-4B-AWQ
-#     Qwen/Qwen3-4B-FP8
-#     Qwen/Qwen3-8B-AWQ
-#     Qwen/Qwen3-8B-FP8
+#     # "unsloth/Qwen3-0.6B-GGUF"
+#     # "unsloth/Qwen3-1.7B-GGUF"
+#     # "unsloth/Qwen3-4B-GGUF"
+#     # "unsloth/Qwen3-8B-GGUF"
+#     # "unsloth/Qwen3-32B-GGUF"
+#     # "unsloth/Qwen3-30B-A3B-Thinking-2507-GGUF"
+#     # "unsloth/Qwen3-Next-80B-A3B-Thinking-GGUF"  # VLLM NOT READY FOR NEXT-GGUF!
+#     # "unsloth/Qwen3-235B-A22B-Thinking-2507-GGUF"  # NOT ENOUGH MEMORY!
 # )
 # QUANT_SCHEMES=(
-#     "no-quant-scheme"
+#     "Q2_K_XL"
+#     "Q3_K_XL"
+#     "Q4_K_XL"
+#     "Q5_K_XL"
+#     "Q6_K_XL"
+#     "Q8_0"
 # )
+
+# Models and quantizations to test (AWQ/FP8)
+MODEL_PATHS=(
+    # Qwen/Qwen3-0.6B-FP8  # (no AWQ version available)
+    # Qwen/Qwen3-1.7B-FP8  # (no AWQ version available)
+    # Qwen/Qwen3-4B-AWQ
+    # Qwen/Qwen3-4B-FP8
+    # Qwen/Qwen3-8B-AWQ
+    # Qwen/Qwen3-8B-FP8
+    cyankiwi/Qwen3-Next-80B-A3B-Thinking-AWQ-4bit
+)
+QUANT_SCHEMES=(
+    "no-quant-scheme"
+)
 
 # Main loop
 for MODEL_PATH in "${MODEL_PATHS[@]}"; do
