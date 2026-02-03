@@ -19,7 +19,7 @@ MODEL_PATHS=(
     # "unsloth/Qwen3-4B-GGUF"
     # "unsloth/Qwen3-8B-GGUF"
     # "unsloth/Qwen3-32B-GGUF"
-    "unsloth/Qwen3-30B-A3B-Thinking-2507-GGUF"
+    # "unsloth/Qwen3-30B-A3B-Thinking-2507-GGUF"
     "unsloth/Qwen3-Next-80B-A3B-Thinking-GGUF"
     # "unsloth/Qwen3-235B-A22B-Thinking-2507-GGUF"
 )
