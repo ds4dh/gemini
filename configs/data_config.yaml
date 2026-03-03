@@ -6,3 +6,4 @@ data_loading_arguments:
   remove_samples_without_label: false
   sample_small_dataset: true
   min_samples_per_class: 15  # only used is sample_small_dataset is true
+  save_chunk_size: 50  # update csv results every this number of samples

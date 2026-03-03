@@ -1,5 +1,6 @@
 import os
 import gc
+import pandas as pd
 import argparse
 import subprocess
 from typing import Any
@@ -49,13 +50,20 @@ def main(args: argparse.Namespace):
     if args.plot_only:
         save_benchmark_results(cfg=cfg)
 
+    # Generate json and png from an existing csv file
+    elif getattr(args, "load_csv_results", None):
+        print(f"Loading previous results from {args.load_csv_results}...")
+        dataset = Dataset.from_pandas(pd.read_csv(args.load_csv_results))
+        # Pass dummy time/memory metrics since we skipped inference
+        benchmark_results = {"dataset": dataset, "time": 0.0, "memory": 0.0}
+        save_benchmark_results(cfg=cfg, benchmark_results=benchmark_results)
+
     # Load data and run the benchmark
     else:
         data_loading_args = cfg["data_loading_arguments"]
         dataset = load_data_formatted_for_benchmarking(args, **data_loading_args)
         run_kwargs = {"cfg": cfg, "dataset": dataset, "debug": args.debug}
         record_one_benchmark(**run_kwargs)
-
 
 def record_one_benchmark(
     cfg: dict,
@@ -79,14 +87,59 @@ def record_one_benchmark(
             desc="Building messages for prompting",
         )
 
-        # Record results
-        benchmark_results = benchmark_one_model(
-            cfg=cfg,
-            model=model,
-            dataset=dataset,
-        )
+        # Pre-calculate the output path for incremental saving
+        output_subdir = cfg["inference_backend"]
+        if cfg.get("use_output_guide"): output_subdir = f"{output_subdir}_guided"
+        output_dir = os.path.join(cfg["result_dir"], output_subdir)
+        os.makedirs(output_dir, exist_ok=True)
+        
+        quant_method = extract_quant_method(cfg["model_path"])
+        if quant_method is not None and quant_method == "gguf":
+            model_result_path = f"{cfg['model_path']}-{cfg['quant_scheme']}.csv"
+        else:
+            model_result_path = f"{cfg['model_path']}-no_quant_scheme.csv"
+        output_path = os.path.join(output_dir, model_result_path)
 
-        # Compute and save benchmark results
+        # Clear existing file to prevent appending rows to an older aborted run
+        if os.path.exists(output_path):
+            os.remove(output_path)
+
+        # Record results in chunks to prevent data loss on crashes
+        all_times, all_mems = [], []
+        num_samples = len(dataset)
+        chunk_size = cfg.get("save_chunk_size", 100)
+        for i in range(0, num_samples, chunk_size):
+            chunk_end = min(i + chunk_size, num_samples)
+            print(f"\nProcessing chunk {i} to {chunk_end} of {num_samples}...")
+            
+            # Select the chunk and run inference
+            chunk = dataset.select(range(i, chunk_end))
+            chunk_results = benchmark_one_model(
+                cfg=cfg,
+                model=model,
+                dataset=chunk,
+            )
+            
+            # Append chunk to CSV on the fly
+            df_chunk = chunk_results["dataset"].to_pandas()
+            df_chunk.to_csv(output_path, mode="a", header=not os.path.exists(output_path), index=False)
+            
+            # Store metrics (weighting time by chunk size to get correct final average)
+            all_times.append(chunk_results["time"] * len(chunk))
+            all_mems.append(chunk_results["memory"])
+
+        # Reload the fully built dataset to pass to the metrics pipeline
+        import pandas as pd
+        full_dataset = Dataset.from_pandas(pd.read_csv(output_path))
+        
+        # Reconstruct the results dictionary with aggregated metrics
+        benchmark_results = {
+            "dataset": full_dataset,
+            "time": sum(all_times) / num_samples if num_samples > 0 else 0.0,
+            "memory": max(all_mems) if all_mems else 0.0,
+        }
+
+        # Compute and save benchmark results (this will also safely overwrite the CSV with final formatting)
         save_benchmark_results(cfg=cfg, benchmark_results=benchmark_results)
         print("Benchmarked %s" % cfg["model_path"])
 
@@ -102,14 +155,15 @@ def record_one_benchmark(
         # Terminate server process if it was started
         if server_process is not None and server_process.poll() is None:
             print("Terminating vLLM server...")
-            # Send a polite SIGTERM signal
-            server_process.terminate()
+            server_process.terminate()  # send a polite SIGTERM signal
+            
+            # Wait for a graceful shutdown
             try:
-                # Wait for a graceful shutdown
                 server_process.wait(timeout=30)
                 print("Server terminated gracefully.")
+            
+            # Force killing the process with SIGKILL
             except subprocess.TimeoutExpired:
-                # Force killing the process with SIGKILL
                 print("Server did not terminate within 30 seconds, killing it.")
                 server_process.kill()
                 server_process.wait()  # wait for the OS to clean up the killed process
@@ -237,6 +291,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--plot-only", "-po", action="store_true",
         help="Only plot the results from a previouly run benchmark."
+    )
+    parser.add_argument(
+        "-l", "--load-csv-results", type=str, default=None,
+        help="Path to an existing CSV file to load results from, skipping inference."
     )
     add_model_arguments(parser)
     add_data_arguments(parser)

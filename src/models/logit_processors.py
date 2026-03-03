@@ -82,7 +82,7 @@ class ThinkingBudgetProcessor(LogitsProcessor):
         for index, state in self.req_state.items():
             self._update_request_state(index, state)
 
-    def apply(self, logits: torch.Tensor) -> torch.Tensor:  # <--- MODIFIED (Logic fully rewritten)
+    def apply(self, logits: torch.Tensor) -> torch.Tensor:
         """
         Apply the gradual logits modification logic for the entire batch.
         """
@@ -106,7 +106,7 @@ class ThinkingBudgetProcessor(LogitsProcessor):
                     state.stopped_thinking = True
                 continue
 
-            # Coming over budget and not yet forcing the sentence
+            # Coming over budget and not yet forcing the sentence, starting now
             if state.tokens_generated > state.max_thinking_tokens:
 
                 # Set up the queue of tokens to force: sentence + </think>
@@ -362,6 +362,10 @@ class JSONParsingProcessor(LogitsProcessor):
         # Process new tokens
         new_tokens = state.output_tokens_ref[state.processed_len:]            
         for token_id in new_tokens:
+            
+            # Erratic behaviour might be triggered in small, over-quantized models
+            if token_id < 0:
+                continue
 
             # We are in "thinking" phase: check if we hit end-of-think token
             if state.parsing_state == ParsingState.PRE_THINK:

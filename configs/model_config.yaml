@@ -1,12 +1,12 @@
 # Model configuration
-model_path: unsloth/Qwen3-4B-GGUF
-quant_scheme: Q5_K_XL
+model_path: unsloth/DeepSeek-R1-Distill-Llama-70B-GGUF
+quant_scheme: Q6_K_XL
 enable_thinking: true  # for, e.g., "Qwen-4B", but not "Qwen-4B-Instruct" (never thinks) or "Qwen-4B-Thinking" (always thinks)
-reasoning_parser: qwen3  # deepseek_r1, qwen3, ... /!\ use deepseek_r1 for explicitely thinking models, qwen3 otherwise
+reasoning_parser: deepseek_r1
 logit_processors:  # null for not using any logit processor
   - src.models.logit_processors:ThinkingBudgetProcessor
   - src.models.logit_processors:JSONParsingProcessor
-max_thinking_tokens: 768  # maximum number of tokens in between <think> and </think>
+max_thinking_tokens: 768  # maximum number of tokens in between <think> and </think>, used by ThinkingBudgetProcessor
 output_schema_name: PatientInfoSchema  # null for not using
 
 # Backend configuration
@@ -25,6 +25,6 @@ use_flash_attention: true  # only used for llama-cpp backend
 
 # Run parameters
 num_gpus_to_use: null  # if null, will take all available gpus by default (see run_benchmark.sh)
-gpu_memory_utilization: 0.80
+gpu_memory_utilization: 0.95
 skip_to_next_model_if_error: true
 delete_model_cache_after_run: true

@@ -151,7 +151,10 @@ def _extract_field_with_regex(
         if not match:
             return None
         try:
-            return field_type(match.group(1))
+            val = field_type(match.group(1))
+            if isinstance(val, int) and (val > 2**63 - 1 or val < -2**63):
+                return -1
+            return val
         except (ValueError, TypeError):
             return None
 

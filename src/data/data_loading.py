@@ -60,20 +60,44 @@ def load_data_formatted_for_benchmarking(
     return Dataset.from_pandas(df_data)
 
 
+# def sample_small_balanced_dataset(
+#     df_data: pd.DataFrame,
+#     min_samples_per_class: int = 200,
+# ) -> pd.DataFrame:
+#     """
+#     Select a small portion of the data that has more or less balanced classes
+#     """
+#     print("Sampling a small, balanced dataset.")
+#     df_data = df_data.groupby("label", group_keys=False)
+#     df_data = df_data.apply(
+#         lambda x: x.sample(n=min(len(x), min_samples_per_class)), 
+#         include_groups=True,
+#     )
+#     df_data = df_data.sample(frac=1)
+#     df_data = df_data.reset_index(drop=True)
+
+#     return df_data
+
+
 def sample_small_balanced_dataset(
     df_data: pd.DataFrame,
     min_samples_per_class: int = 200,
 ) -> pd.DataFrame:
     """
-    Select a small portion of the data that has more or less balanced classes
+    Select a small portion of the data that has more or less balanced classes.
     """
     print("Sampling a small, balanced dataset.")
-    df_data = df_data.groupby("label", group_keys=False)
-    df_data = df_data.apply(
-        lambda x: x.sample(n=min(len(x), min_samples_per_class)), 
-        include_groups=True,
-    )
+    
+    # Iterate explicitly over the groups
+    sampled_chunks = []
+    for _, group in df_data.groupby("label"):
+        # Sample from the group (which preserves all columns, including 'label')
+        chunk = group.sample(n=min(len(group), min_samples_per_class))
+        sampled_chunks.append(chunk)
+
+    # Concatenate all chunks back together
+    df_data = pd.concat(sampled_chunks, ignore_index=True)
     df_data = df_data.sample(frac=1)
     df_data = df_data.reset_index(drop=True)
-
+    
     return df_data

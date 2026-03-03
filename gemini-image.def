@@ -5,10 +5,10 @@ From: pytorch/pytorch:2.8.0-cuda12.9-cudnn9-devel
     requirements.txt /app/
 
 %post
-    # Set correct permissions for /tmp to fix apt-key errors
+    # Set correct permissions for /tmp
     chmod 1777 /tmp
 
-    # Install basics
+    # Install basics + screen + libssl + openMP (used by llama-cpp)
     apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         cmake \
@@ -16,34 +16,40 @@ From: pytorch/pytorch:2.8.0-cuda12.9-cudnn9-devel
         python3 \
         python3-pip \
         curl \
-        ca-certificates
+        wget \
+        screen \
+        ca-certificates \
+        libssl-dev \
+        libgomp1 \
+        libstdc++-11-dev
     ln -s /usr/bin/python3 /usr/bin/python
 
-    # Use uv to create a virtual environment and install packages
-    pip install uv
+    # Compile gguf-split tool from llama.cpp repository
+    echo "Building gguf-split tool..."
+    git clone https://github.com/ggerganov/llama.cpp /tmp/llama.cpp
+    cd /tmp/llama.cpp
+    cmake -B build -DGGML_CUDA=OFF -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF
+    cmake --build build --config Release -j --target llama-gguf-split
+    cp build/bin/llama-gguf-split /usr/local/bin/gguf-split
+    echo "Installing shared libraries..."
+    find build -name "*.so*" -exec cp -v {} /usr/local/lib/ \;
+    ldconfig
+    cd /app
+    rm -rf /tmp/llama.cpp
 
-    # Create the /app directory and move into it
+    # Python setup
+    pip install uv
     mkdir -p /app
     cd /app
-
-    # Now that we are in /app, the venv will be created at /app/.venv
     uv venv
-
-    # Install all required packages into /app/.venv
     uv pip install --upgrade -r /app/requirements.txt
 
-    # For llama-cpp-python with CMAKE_ARGS
-    # REMOVING THIS INSTALLATION FOR NOW, AS I USE VLLM EVEN FOR GGUF FILES
-    # uv pip install --no-cache-dir llama-cpp-python --config-settings="cmake.args=-DGGML_CUDA=on"
-
 %environment
-    # Add the venv to the PATH
     export PATH="/app/.venv/bin:$PATH"
-
-    # Explicitly point to the correct cert bundle installed by ca-certificates
     export SSL_CERT_FILE="/etc/ssl/certs/ca-certificates.crt"
+    # export LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH" forgot to put it last time
 
 %labels
     Author alban.bornet@unige.ch
-    Version 0.1
-    Description "Gemini container with vllm installed using uv"
+    Version 0.2
+    Description "Gemini container with vllm and native gguf-split"

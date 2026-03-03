@@ -5,6 +5,7 @@ CONFIG_FILE="./configs/model_config.yaml"
 INFERENCE_BACKEND="vllm-serve-async"
 GPU_MEM_UTIL="0.80"
 MAX_CONCURRENT_INFS="64"
+OVERLAY_VLLM_CACHE="/overlay/.cache/vllm/"
 
 # Check if the configuration file exists
 if [ ! -f "$CONFIG_FILE" ]; then
@@ -14,18 +15,18 @@ fi
 
 # Models and quantizations to test (GGUF)
 MODEL_PATHS=(
-    "unsloth/Qwen3-8B-GGUF"
-    "unsloth/Qwen3-4B-GGUF"
-    "unsloth/Qwen3-1.7B-GGUF"
     "unsloth/Qwen3-0.6B-GGUF"
+    "unsloth/Qwen3-1.7B-GGUF"
+    "unsloth/Qwen3-4B-GGUF"
+    "unsloth/Qwen3-8B-GGUF"
 )
 QUANT_SCHEMES=(
-    "Q8_0"
-    "Q6_K_XL"
-    "Q5_K_XL"
-    "Q4_K_XL"
-    "Q3_K_XL"
     "Q2_K_XL"
+    "Q3_K_XL"
+    "Q4_K_XL"
+    "Q5_K_XL"
+    "Q6_K_XL"
+    "Q8_0"
 )
 
 # # Models and quantizations to test (AWQ/FP8)
@@ -40,6 +41,16 @@ QUANT_SCHEMES=(
 # QUANT_SCHEMES=(
 #     "no-quant-scheme"
 # )
+
+# Load local variables from .env file
+if [ -f .env ]; then
+    set -a
+    source .env
+    set +a
+else
+    echo "Error: .env file not found!"
+    exit 1
+fi
 
 # Main loop
 for MODEL_PATH in "${MODEL_PATHS[@]}"; do
@@ -65,14 +76,17 @@ for MODEL_PATH in "${MODEL_PATHS[@]}"; do
         sed -i "s|^max_concurrent_inferences:.*|max_concurrent_infs: $MAX_CONCURRENT_INFS|" "$CONFIG_FILE"
         echo "Updated '$CONFIG_FILE' for the current run."
 
+        # Delete vLLM cache for safety
+        rm -r "$OVERLAY_VLLM_CACHE"
+
         # Run the benchmark with updated configuration
         python -m scripts.run_benchmark \
             --encrypted-data-path "./data/data_2025/processed/dataset.encrypted.csv" \
             --curated-data-path "./data/data_2024/processed/dataset.csv" \
-            --remote-env-path "/home/shares/ds4dh/gemini_project/gemini/.env" \
+            --remote-env-path "/home/borneta/Documents/gemini/.env" \
             --key-name "GEMINI" \
-            --hostname "login1.baobab.hpc.unige.ch" \
-            --username "borneta" \
+            --hostname "$REMOTE_HOSTNAME" \
+            --username "$REMOTE_USERNAME"  \
             --data-config-path "./configs/data_config.yaml" \
             --model-config-path "./configs/model_config.yaml" \
             --prompt-config-path "./configs/prompt_config.yaml"

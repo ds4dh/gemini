@@ -1,3 +1,5 @@
+import os
+import re
 import time
 import httpx
 import psutil
@@ -63,7 +65,7 @@ def _load_model_vllm_server(
     max_batched_tokens: int = 32768,
     host: str = "localhost",
     port: int | None = None,
-    client_timeout: int | float = 7200,
+    client_timeout: int | float = 43200,  # 7200,
     async_mode: bool = False,
     *args, **kwargs,
 ) -> tuple[OpenAI, subprocess.Popen]:
@@ -74,7 +76,9 @@ def _load_model_vllm_server(
     """
     # Special case for gguf models, where model file is pre-downloaded locally
     tokenizer_name = get_tokenizer_name(model_path)
+    enforce_eager = None
     if quant_method == "gguf":
+        enforce_eager = True  # solves unnecessary torch compile crashes
         model_path = download_gguf_by_quant(model_path, quant_scheme)
 
     # Build the server command declaratively
@@ -100,7 +104,7 @@ def _load_model_vllm_server(
         # Performance
         "--dtype": "auto",  # should be bfloat16 if possible and float16 if not
         "--quantization": quant_method,
-        "--enforce-eager": None,
+        "--enforce-eager": enforce_eager,
     }
 
     # Convert parameters to command-line arguments
@@ -256,18 +260,102 @@ def get_tokenizer_name(
     return tokenizer_name
 
 
+# def download_gguf_by_quant(model_id: str, quant_scheme: str) -> str:
+#     """
+#     Download the first matching GGUF file in a model repository
+#     """
+#     quant_scheme_lower = quant_scheme.lower()
+#     files = list_repo_files(model_id)
+#     for file in files:
+#         file_lower = file.lower()
+#         if file_lower.endswith(".gguf") and quant_scheme_lower in file_lower:
+#             return hf_hub_download(repo_id=model_id, filename=file)
+        
+#     raise FileNotFoundError(f"No GGUF file found with quantization scheme '{quant_scheme}' in repo '{model_id}'")
+
+
 def download_gguf_by_quant(model_id: str, quant_scheme: str) -> str:
     """
-    Download the first matching GGUF file in a model repository
+    Orchestrates the download of GGUF files. If split files are detected,
+    downloads all parts and calls the merge function.
     """
     quant_scheme_lower = quant_scheme.lower()
     files = list_repo_files(model_id)
+    
+    # Identify the primary file
+    target_file = None
     for file in files:
         file_lower = file.lower()
         if file_lower.endswith(".gguf") and quant_scheme_lower in file_lower:
-            return hf_hub_download(repo_id=model_id, filename=file)
+            # Prioritize part 1 of a split set
+            if "00001-of-" in file_lower:
+                target_file = file
+                break
+            if target_file is None:
+                target_file = file
+
+    if target_file is None:
+        raise FileNotFoundError(
+            f"No GGUF file found with quantization scheme '{quant_scheme}' in repo '{model_id}'"
+        )
+
+    # Check for split files and return single path if existing
+    split_match = re.search(r"^(.*)-(\d{5})-of-(\d{5})\.gguf$", target_file)
+    if not split_match:
+        print(f"Detected single GGUF file: {target_file}")
+        return hf_hub_download(repo_id=model_id, filename=target_file)
+    
+    # Handle split download
+    base_name = split_match.group(1)
+    total_parts = int(split_match.group(3))
+    print(f"Detected split GGUF model ({total_parts} parts). Downloading...")
+    first_part_path = hf_hub_download(repo_id=model_id, filename=target_file)
+    for i in range(2, total_parts + 1):
+        shard_name = f"{base_name}-{i:05d}-of-{total_parts:05d}.gguf"
+        print(f"Downloading part {i}/{total_parts}: {shard_name}")
+        hf_hub_download(repo_id=model_id, filename=shard_name)
+
+    # Merge all GGUF files into a single one, for vLLM
+    return merge_gguf_shards(first_part_path)
+
+
+def merge_gguf_shards(first_part_path: str) -> str:
+    """
+    Merges split GGUF files using the installed 'gguf-split' CLI tool.
+    
+    Args:
+        first_part_path (str): Path to the first file (e.g., model-00001-of-00002.gguf)
         
-    raise FileNotFoundError(f"No GGUF file found with quantization scheme '{quant_scheme}' in repo '{model_id}'")
+    Returns:
+        str: The path to the successfully merged file.
+    """
+    # Construct the output filename (removing the split suffix)
+    base_dir = os.path.dirname(first_part_path)
+    original_filename = os.path.basename(first_part_path)
+    merged_filename = re.sub(r"-\d{5}-of-\d{5}", "", original_filename)
+    
+    # If regex didn't change anything (unexpected naming), append "-merged"
+    if merged_filename == original_filename:
+        merged_filename = f"{original_filename.replace('.gguf', '')}-merged.gguf"
+        
+    # If the merged file already exists, return it to save time
+    merged_path = os.path.join(base_dir, merged_filename)
+    if os.path.exists(merged_path):
+        print(f"Found previously merged file: {merged_path}")
+        return merged_path
+
+    # Usage: gguf-split --merge <first-split-file-path> <output-file-path>
+    print(f"Merging shards into: {merged_path}")
+    try:
+        cmd = ["gguf-split", "--merge", first_part_path, merged_path]
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        print(f"Merge successful! Single file built at {merged_path}")
+        return merged_path
+        
+    except FileNotFoundError:
+        raise RuntimeError("The 'gguf-split' tool was not found in the system PATH.\n")
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"gguf-split failed to merge files. Error: {e}")
 
 
 def download_model(model_id):
