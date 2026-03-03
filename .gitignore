@@ -163,6 +163,7 @@ cython_debug/
 
 # Custom
 *.csv
+*.sif
 logs/*
 data/data_2024/*
 data/data_2025/*
