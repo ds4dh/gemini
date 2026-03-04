@@ -5,12 +5,13 @@ from src.data.encryption import read_pandas_from_encrypted_file
 
 
 def load_data_formatted_for_benchmarking(
-    args: argparse.Namespace,
+    cfg_args: argparse.Namespace,
     use_curated_dataset: bool = False,
     add_curated_dataset: bool = False,
     remove_samples_without_label: bool = False,
     sample_small_dataset: bool = False,
     min_samples_per_class: int = 200,
+    *args, **kwargs,
 ) -> Dataset:
     """
     Load and preprocess data for benchmarking
@@ -24,24 +25,24 @@ def load_data_formatted_for_benchmarking(
             )
 
         print("Loading curated dataset...")
-        df_data = pd.read_csv(args.curated_data_path)
+        df_data = pd.read_csv(cfg_args.curated_data_path)
 
     # Load dataset file (large, non-curated dataset + encrypted)
     else:
         print("Loading encrypted dataset...")
         df_data = read_pandas_from_encrypted_file(
-            encrypted_file_path=args.encrypted_data_path,
-            encryption_key_var_name=args.key_name,
-            hostname=args.hostname,
-            username=args.username,
-            remote_env_path=args.remote_env_path,
-            port=args.port,
+            encrypted_file_path=cfg_args.encrypted_data_path,
+            encryption_key_var_name=cfg_args.key_name,
+            hostname=cfg_args.hostname,
+            username=cfg_args.username,
+            remote_env_path=cfg_args.remote_env_path,
+            port=cfg_args.port,
         )
 
     # Add small, curated dataset if required
     if add_curated_dataset:
         print("Adding curated dataset...")
-        df_curated = pd.read_csv(args.curated_data_path)
+        df_curated = pd.read_csv(cfg_args.curated_data_path)
         df_data = pd.concat([df_data, df_curated], ignore_index=True)
 
     # Check for the presence of benchmarking fields
