@@ -6,7 +6,7 @@ reasoning_parser: qwen3  # deepseek_r1, qwen3, ... /!\ use deepseek_r1 for expli
 logits_processors:  # null for not using any logit processor
   - src.models.logits_processors:ThinkingBudgetProcessor
   - src.models.logits_processors:JSONParsingProcessor
-max_thinking_tokens: 768  # maximum number of tokens in between <think> and </think>
+max_thinking_tokens: 1024  # maximum number of tokens in between <think> and </think>
 output_schema_name: PatientInfoSchema  # null for not using
 
 # Backend configuration
@@ -17,7 +17,7 @@ max_concurrent_infs: 64
 # Inference configuration
 n_inference_repeats: 10  # number of times each inference is repeated for benchmark
 use_output_guide: true
-max_context_length: 10000  # note: maximum number of tokens in our documents is approximately 8200, and prompt size is about 1000 tokens
+max_context_length: 12000  # note: maximum number of tokens in our documents is approximately 8200, and prompt size is about 1000 tokens
 max_new_tokens: 1024  # 1024 - note: this corresponds to the maximum generated tokens
 top_p: 0.90
 temperature: 0.60
