@@ -98,11 +98,13 @@ def record_one_benchmark(
             model_result_path = f"{cfg['model_path']}-{cfg['quant_scheme']}.csv"
         else:
             model_result_path = f"{cfg['model_path']}-no_quant_scheme.csv"
-        output_path = os.path.join(output_dir, model_result_path)
 
-        # Clear existing file to prevent appending rows to an older aborted run
-        if os.path.exists(output_path):
-            os.remove(output_path)
+        # Build output path and prevent appending rows to an older aborted run
+        output_path = os.path.join(output_dir, model_result_path)
+        output_path_chunks = output_path.replace(".csv", "_chunks.csv")
+        os.makedirs(os.path.split(output_path_chunks)[0], exist_ok=True)
+        if os.path.exists(output_path_chunks):
+            os.remove(output_path_chunks)
 
         # Record results in chunks to prevent data loss on crashes
         all_times, all_mems = [], []
@@ -121,15 +123,18 @@ def record_one_benchmark(
             )
             
             # Append chunk to CSV on the fly
-            df_chunk = chunk_results["dataset"].to_pandas()
-            df_chunk.to_csv(output_path, mode="a", header=not os.path.exists(output_path), index=False)
+            df_chunk: Dataset = chunk_results["dataset"].to_pandas()
+            df_chunk.to_csv(
+                output_path_chunks, mode="a", index=False,
+                header=not os.path.exists(output_path_chunks),
+            )
             
             # Store metrics (weighting time by chunk size to get correct final average)
             all_times.append(chunk_results["time"] * len(chunk))
             all_mems.append(chunk_results["memory"])
 
         # Reconstruct the results dictionary with aggregated metrics
-        full_dataset = Dataset.from_pandas(pd.read_csv(output_path))
+        full_dataset = Dataset.from_pandas(pd.read_csv(output_path_chunks))
         benchmark_results = {
             "dataset": full_dataset,
             "time": sum(all_times) / num_samples if num_samples > 0 else 0.0,
