@@ -128,11 +128,8 @@ def record_one_benchmark(
             all_times.append(chunk_results["time"] * len(chunk))
             all_mems.append(chunk_results["memory"])
 
-        # Reload the fully built dataset to pass to the metrics pipeline
-        import pandas as pd
-        full_dataset = Dataset.from_pandas(pd.read_csv(output_path))
-        
         # Reconstruct the results dictionary with aggregated metrics
+        full_dataset = Dataset.from_pandas(pd.read_csv(output_path))
         benchmark_results = {
             "dataset": full_dataset,
             "time": sum(all_times) / num_samples if num_samples > 0 else 0.0,
