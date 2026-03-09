@@ -87,7 +87,7 @@ def record_one_benchmark(
             desc="Building messages for prompting",
         )
 
-        # Pre-calculate the output path for incremental saving
+        # Pre-calculate the output directory for incremental saving
         output_subdir = cfg["inference_backend"]
         if cfg.get("use_output_guide"): output_subdir = f"{output_subdir}_guided"
         output_dir = os.path.join(cfg["result_dir"], output_subdir)
@@ -99,11 +99,17 @@ def record_one_benchmark(
         else:
             model_result_path = f"{cfg['model_path']}-no_quant_scheme.csv"
 
-        # Build output path and prevent appending rows to an older aborted run
+        # Build output path and prepare for chunked saving
         output_path = os.path.join(output_dir, model_result_path)
         output_path_chunks = output_path.replace(".csv", "_chunks.csv")
         os.makedirs(os.path.split(output_path_chunks)[0], exist_ok=True)
-        if os.path.exists(output_path_chunks):
+
+        # Resume vs overwrite logic
+        if cfg["resume_previous_run"] and os.path.exists(output_path_chunks):
+            existing_df = pd.read_csv(output_path_chunks)
+            processed = set(existing_df["input_text"])
+            dataset = dataset.filter(lambda x: x["input_text"] not in processed)
+        elif os.path.exists(output_path_chunks):
             os.remove(output_path_chunks)
 
         # Record results in chunks to prevent data loss on crashes
