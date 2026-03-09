@@ -191,8 +191,8 @@ async def _infer_vllm_serve_async(
     """
     Runs inference by querying the vLLM server asynchronously
     """
-    # Initialization
-    client = model
+    # Re-initialize the client inside the current event loop to prevent 'Event loop is closed' errors
+    client = AsyncOpenAI(base_url=str(model.base_url), api_key=model.api_key, timeout=model.timeout)  # client = model
     model_name = (await client.models.list()).data[0].id
     semaphore = asyncio.Semaphore(max_concurrent_requests)  # to avoid overload
     response_format, extra_body = _setup_inference_output(output_schema_model, enable_thinking, max_thinking_tokens)
