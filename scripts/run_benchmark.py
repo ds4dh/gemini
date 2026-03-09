@@ -109,8 +109,10 @@ def record_one_benchmark(
             existing_df = pd.read_csv(output_path_chunks)
             processed = set(existing_df["input_text"])
             dataset = dataset.filter(lambda x: x["input_text"] not in processed)
+            print(f"Processing {output_path_chunks} further ({len(processed)} already processed samples)")
         elif os.path.exists(output_path_chunks):
             os.remove(output_path_chunks)
+            print(f"Deleting {output_path_chunks} and processing it from the top")
 
         # Record results in chunks to prevent data loss on crashes
         all_times, all_mems = [], []
