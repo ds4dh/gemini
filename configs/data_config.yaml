@@ -1,7 +1,7 @@
 # Data and results
 result_dir: "./results"
 resume_previous_run: true  # set to false if you want to overwrite / restart inference
-save_chunk_size: 20  # update csv results every this number of samples
+save_chunk_size: 100  # update csv results every this number of samples
 data_loading_arguments:
   use_curated_dataset: true  # use only the non-encrypted dataset
   add_curated_dataset: false  # add the non-encrypted dataset
