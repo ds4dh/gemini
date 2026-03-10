@@ -17,7 +17,7 @@ max_concurrent_infs: 64
 # Inference configuration
 n_inference_repeats: 10  # number of times each inference is repeated for benchmark
 use_output_guide: true
-max_context_length: 12000  # note: maximum number of tokens in our documents is approximately 8200, and prompt size is about 1000 tokens
+max_context_length: 20000  # note: maximum number of tokens in our documents is approximately 8200, and prompt size is about 1000 tokens
 max_new_tokens: 1024  # 1024 - note: this corresponds to the maximum generated tokens
 top_p: 0.90
 temperature: 0.60
