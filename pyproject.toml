@@ -22,7 +22,7 @@ classifiers = [
 
 # Dependencies (uv pip install -e .)
 dependencies = [
-    "vllm",
+    "vllm==0.15.1",
     "flashinfer-python",
     "transformers",
     "datasets",
