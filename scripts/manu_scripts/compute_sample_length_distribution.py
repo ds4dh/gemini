@@ -4,7 +4,7 @@ import seaborn as sns
 from transformers import AutoTokenizer
 
 # Configuration
-file_path = r"gemini\data\paper\patient_data_with_results.csv"
+file_path = "/data/paper/patient_data_with_results.csv"
 model_id = "Qwen/Qwen3-32B"  # Replace with your specific Qwen3 repo if different
 
 def main():
