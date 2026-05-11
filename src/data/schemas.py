@@ -15,6 +15,14 @@ class ClinicalEventType(str, Enum):
     DISCHARGE = "Discharge"
     PROCEDURE = "Procedure"
 
+class SmokingStatus(str, Enum):
+    """
+    Whether a patient smokes or used to smoke
+    """
+    SMOKER = "Smoker"
+    NON_SMOKER = "Non-smoker"
+    FORMER_SMOKER = "Former-smoker"
+    UNKNOWN = "Unknown"
 
 class ClinicalEventDate(BaseModel):
     """
@@ -28,11 +36,17 @@ class PatientInfoSchema(BaseModel):
     """
     Schema for extracting key patient information
     """
-    mRS: int = Field(
-        default=-1,
-        ge=0,
-        le=6,
+    # mRS: int = Field(
+    #     default=-1,
+    #     ge=0,
+    #     le=6,
+    # )
+
+    smoking_status: SmokingStatus = Field(
+        default=SmokingStatus.UNKNOWN, 
+        description="Whether a patient smokes or used to smoke",
     )
+
     # clinical_dates: List[ClinicalEventDate] = Field(
     #     default_factory=list,
     # )

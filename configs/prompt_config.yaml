@@ -9,29 +9,39 @@ prompt_templates:
     {input_text}
     FIN DU TEXTE
 
+# context_data:
+#   task_description: |
+#     Tu es un neuro-chirurgien et ta tâche est d’identifier le score sur l’Échelle de Rankin Modifiée (mRS) du patient en fonction de son état,
+#     tel qu'il est décrit dans le texte qui suit, généralement une lettre de sortie rédigée par un autre médecin.
+#   domain_knowledge: |
+#     L'Échelle de Rankin Modifiée (mRS) est utilisée pour mesurer le degré d'incapacité chez les patients ayant subi un accident vasculaire cérébral (AVC) :
+#     0 : Aucun symptôme
+#     1 : Aucune incapacité significative malgré des symptômes ; capable d'effectuer toutes les tâches et activités habituelles
+#     2 : Légère incapacité ; incapable d'effectuer toutes les activités antérieures, mais capable de s'occuper de ses propres affaires sans assistance
+#     3 : Incapacité modérée ; nécessitant une certaine aide, mais capable de marcher sans assistance
+#     4 : Incapacité modérément sévère ; incapable de marcher sans assistance et incapable de s'occuper de ses besoins corporels sans assistance
+#     5 : Incapacité sévère ; alité, incontinent et nécessitant des soins infirmiers constants et une attention continue
+#     6 : Décédé
+#   output_specifications: |
+#     Si tu inclus un raisonnement, mets-le uniquement entre les balises <think> et </think> et limite-le à 5 phrases maximum.
+#     La réponse finale doit être un objet JSON strict, sans texte additionnel, conforme au format suivant :
+#     {
+#       "mRS": <nombre entre 0 et 6>
+#     }
+
 context_data:
   task_description: |
-    Tu es un neuro-chirurgien et ta tâche est d’identifier le score sur l’Échelle de Rankin Modifiée (mRS) du patient en fonction de son état,
-    tel qu'il est décrit dans le texte qui suit, généralement une lettre de sortie rédigée par un autre médecin.
+    Tu es un expert médical et ta tâche est d’extraire le statut tabagique (smoking status) du patient,
+    tel qu'il est décrit dans le texte qui suit, généralement un rapport ou une lettre de sortie rédigée par un autre médecin.
   domain_knowledge: |
-    L'Échelle de Rankin Modifiée (mRS) est utilisée pour mesurer le degré d'incapacité chez les patients ayant subi un accident vasculaire cérébral (AVC) :
-    0 : Aucun symptôme
-    1 : Aucune incapacité significative malgré des symptômes ; capable d'effectuer toutes les tâches et activités habituelles
-    2 : Légère incapacité ; incapable d'effectuer toutes les activités antérieures, mais capable de s'occuper de ses propres affaires sans assistance
-    3 : Incapacité modérée ; nécessitant une certaine aide, mais capable de marcher sans assistance
-    4 : Incapacité modérément sévère ; incapable de marcher sans assistance et incapable de s'occuper de ses besoins corporels sans assistance
-    5 : Incapacité sévère ; alité, incontinent et nécessitant des soins infirmiers constants et une attention continue
-    6 : Décédé
+    Le statut tabagique doit être classé en utilisant *exactement* l'une des catégories en anglais suivantes :
+    - "Smoker" : Le patient fume actuellement, est un fumeur actif, ou présente un tabagisme non sevré.
+    - "Non-smoker" : Le patient n'a jamais fumé ou est explicitement décrit comme non-fumeur.
+    - "Former-smoker" : Le patient a fumé dans le passé mais a arrêté (ex-fumeur, tabagisme sevré, ancien fumeur).
+    - "Unknown" : Le texte ne mentionne aucune information concernant les habitudes tabagiques du patient.
   output_specifications: |
     Si tu inclus un raisonnement, mets-le uniquement entre les balises <think> et </think> et limite-le à 5 phrases maximum.
     La réponse finale doit être un objet JSON strict, sans texte additionnel, conforme au format suivant :
     {
-      "mRS": <nombre entre 0 et 6>
-    }
-
-context_data_no_thinking:  # any field that needs to be changed if enable_thinking = false
-  output_specifications: |
-    La réponse finale doit être un objet JSON strict, sans texte additionnel, conforme au format suivant :
-    {
-      "mRS": <nombre entre 0 et 6>
+      "smoking_status": "<choisir une valeur parmi: Smoker, Non-smoker, Former-smoker, Unknown>"
     }
