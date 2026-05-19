@@ -9,7 +9,7 @@ PROMPT_CONFIG_PATH="./configs/prompt_config.yaml"
 
 # Configuration
 INFERENCE_BACKEND="vllm-serve-async"
-GPU_MEM_UTIL="0.65"
+GPU_MEM_UTIL="0.55"
 MAX_CONCURRENT_INFS="64"
 
 # Check if the model configuration file exists
