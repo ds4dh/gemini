@@ -2,6 +2,17 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from transformers import AutoTokenizer
 
+### LOGS ###
+# --- Token Length Statistics ---
+# Total Samples: 103
+# Mean:          2076.21
+# Median:        1882.00
+# Std Dev:       850.54
+# Min:           443
+# Max:           5612
+# Plot saved successfully as 'token_length_distribution.png'
+### LOGS ###
+
 # Configuration
 file_path = "/data/paper/patient_data_with_results.csv"
 model_id = "Qwen/Qwen3-32B"

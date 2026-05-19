@@ -316,3 +316,58 @@ def get_gpu_memory_usage_by_pid():
     # Convert to GB and return
     GB_used_by_pid = MiB_used_by_pid * 1024 ** 2 / 1000 ** 3
     return GB_used_by_pid
+
+
+def save_consensus_predictions(
+    dataset: Dataset,
+    output_path: str,
+    keep_columns: list[str] = ["text", "label", "case_id"],
+) -> None:
+    """
+    Creates a CSV containing the 1st prediction, and majority votes for the
+    first 3, 5, and 10 models for each sample.
+    
+    Args:
+        dataset: The HuggingFace dataset containing raw model outputs.
+        output_path: The base path where the main results were saved.
+        keep_columns: List of original dataset columns to keep in the new CSV.
+    """
+    # Extract predictions per run using your existing helper
+    preds_and_labels = extract_preds_and_labels(dataset)
+    num_models = len(preds_and_labels)
+    num_samples = len(dataset)
+
+    # Extract all votes for sample across all runs
+    new_rows = []
+    for i in range(num_samples):
+        votes = [run[i]["mRS"] for run in preds_and_labels]
+        row = {col: dataset[i][col] for col in keep_columns if col in dataset.column_names}
+
+        # Calculate consensi
+        row["pred_1"] = votes[0] if num_models >= 1 else None
+        if num_models >= 3:
+            # .most_common(1) returns [(value, count)], we take [0][0] for the value
+            row["pred_maj_3"] = Counter(votes[:3]).most_common(1)[0][0]
+        else:
+            row["pred_maj_3"] = None
+        if num_models >= 5:
+            row["pred_maj_5"] = Counter(votes[:5]).most_common(1)[0][0]
+        else:
+            row["pred_maj_5"] = None
+        if num_models >= 10:
+            row["pred_maj_10"] = Counter(votes[:10]).most_common(1)[0][0]
+        else:
+            row["pred_maj_10"] = None
+
+        # Record data
+        new_rows.append(row)
+
+    # Save updated results
+    consensus_dataset = Dataset.from_list(new_rows)
+    dir_name, base_name = os.path.split(output_path)
+    new_filename = base_name.replace(".csv", "_data_with_predictions.csv")
+    if new_filename == base_name:  # handle case where .csv wasn't in the string
+        new_filename = f"{base_name}_data_with_predictions.csv"        
+    final_path = os.path.join(dir_name, new_filename)
+    consensus_dataset.to_csv(final_path, index=False)
+    print(f"Saved consensus predictions at {final_path}")
