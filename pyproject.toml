@@ -26,6 +26,7 @@ dependencies = [
     "flashinfer-python",
     "transformers",
     "datasets",
+    "pyarrow<21.0.0",
     "huggingface_hub",
     "torch",
     "numpy",
