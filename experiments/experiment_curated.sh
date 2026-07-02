@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # Paths
-CURATED_DATA_PATH="/data/final/20260302_Letters_Combined.csv"
+# CURATED_DATA_PATH="/data/final/20260302_Letters_Combined.csv"
+CURATED_DATA_PATH="/data/paper/patient_data.csv"
 MODEL_CONFIG_PATH="./configs/model_config.yaml"
 DATA_CONFIG_PATH="./configs/data_config.yaml"
 PROMPT_CONFIG_PATH="./configs/prompt_config.yaml"
@@ -31,9 +32,9 @@ MODEL_PATHS=(
 QUANT_SCHEMES=(
     # "Q2_K_XL"
     # "Q3_K_XL"
-    # "Q4_K_XL"
+    "Q4_K_XL"
     # "Q5_K_XL"
-    "Q6_K_XL"
+    # "Q6_K_XL"
     # "Q8_0"
 )
 
