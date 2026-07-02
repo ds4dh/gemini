@@ -6,6 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import matplotlib.colors as mcolors
+import seaborn as sns
 import statsmodels.formula.api as smf
 
 
@@ -42,15 +43,12 @@ def _extract_metric_value(
     key: str,
     default_val: float=None,
 ) -> float:
-    """ Helper to extract a single metric value
-    """
     item_data = data_source.get(key)
     if item_data and isinstance(item_data.get("values"), list) and item_data["values"]:
         try:
-            return float(item_data["values"][0])  # Get the first element
+            return float(item_data["values"][0])
         except (ValueError, TypeError, IndexError) as e:
-            print(f"Warning: Could not parse value for key {key} from {item_data.get('values')}: {e}. Using default: {default_val}.")
-
+            print(f"Warning: Could not parse value for key {key}: {e}.")
     return default_val
 
 
@@ -60,10 +58,6 @@ def generate_pooled_metric_plots(
     output_dir: str,
     target_variable: str,
 ) -> None:
-    """ Generate a single figure with subplots for Error Rate vs VRAM,
-        each model group plotted with a different color within each subplot
-    """
-    # Plot each case data to a subplot
     if not os.path.exists(output_dir): os.makedirs(output_dir)
     num_cols = 2
     num_rows = math.ceil(len(CASES) / num_cols)
@@ -72,55 +66,46 @@ def generate_pooled_metric_plots(
     csv_data = []
     
     for i, case_name in enumerate(CASES):
-        raw_key = CASE_MAPPING.get(case_name, "single")  # get internal key
+        raw_key = CASE_MAPPING.get(case_name, "single")  
         
         for group_idx, (group_label, result_paths_in_group) in enumerate(result_path_group.items()):
             group_data_points = []
             group_color = GROUP_COLORS[group_idx % len(GROUP_COLORS)]
             for result_path in result_paths_in_group:
 
-                # Load data
                 try:
                     with open(result_path, "r") as f:
                         data = json.load(f)
                 except (FileNotFoundError, json.JSONDecodeError) as e:
-                    print(f"Warning: Could not load or parse JSON file {result_path}: {e}. Skipping.")
                     continue
 
                 extracted_data = {"model": group_label}
 
-                # Extract X values
                 for x_id in X_CONFIGS:
                     query_key = X_CONFIGS[x_id]["key"]
                     extracted_data[x_id] = _extract_metric_value(data, query_key)
 
-                # Extract Y values and compute confidence intervals
                 for y_id in Y_CONFIGS:
-                    # Get the mean value
                     query_key = f"{Y_CONFIGS[y_id]['key']}\n({case_name})"
                     y_id_cased = f"{y_id} - {case_name}"
                     extracted_data[y_id_cased] = _extract_metric_value(data, query_key)
 
-                    # Bootstrap confidence intervals using raw data
                     try:
                         raw_true = data.get("y_true", {}).get(raw_key, [])
                         raw_pred = data.get("y_pred", {}).get(raw_key, [])
                         low_err, up_err = calculate_bootstrap_ci(raw_true, raw_pred, y_id)
                         extracted_data[f"{y_id_cased}_err_low"] = low_err
                         extracted_data[f"{y_id_cased}_err_high"] = up_err
-                    except Exception as e:
-                        print(f"Warning: CI calc failed for {result_path}: {e}")
+                    except Exception:
                         extracted_data[f"{y_id_cased}_err_low"] = 0.0
                         extracted_data[f"{y_id_cased}_err_high"] = 0.0
 
-                # Temporary fix for fp8
                 if "fp8" in result_path.lower():
                     extracted_data["nbits"] = extracted_data["nbits"] * 2
                     extracted_data["vram"] = extracted_data["vram"] * 2
                 
                 group_data_points.append(extracted_data)
             
-            # Remove points where the X or Y data is None (missing in JSON)
             plotted_y_key = f"{target_variable} - {case_name}"
             valid_points = []
             for dp in group_data_points:
@@ -131,19 +116,16 @@ def generate_pooled_metric_plots(
             group_data_points = valid_points
             if not group_data_points: continue
 
-            # Scatter plot for the current group
             x_values = [dp[MAIN_X_VARIABLE] for dp in group_data_points]
             plotted_y_id_cased = f"{target_variable} - {case_name}"
             y_values = [dp[plotted_y_id_cased] for dp in group_data_points]
             sizes = [200 * dp["nbits"] / 16 for dp in group_data_points]
 
-            # Plot the scatter points
             axes_flat[i].scatter(
                 x_values, y_values, color=group_color, label=group_label,
                 marker="o", alpha=0.9, s=sizes, edgecolors='white', linewidth=0.5, zorder=1,
             )
 
-            # Plot the error bars
             rgb = mcolors.to_rgb(group_color)
             darker_color = tuple(c * 0.5 for c in rgb)
             y_err_low = [dp[f"{plotted_y_id_cased}_err_low"] for dp in group_data_points]
@@ -154,10 +136,8 @@ def generate_pooled_metric_plots(
                 ecolor=darker_color, alpha=0.7, capsize=3, zorder=2,
             )
 
-            # Record data for pooled json/csv
             csv_data.extend(group_data_points)
 
-        # Configure subplot
         x_label = f"{X_CONFIGS[MAIN_X_VARIABLE]['key']} [{X_CONFIGS[MAIN_X_VARIABLE]['unit']}]"
         y_label = f"{Y_CONFIGS[target_variable]['key']} [{Y_CONFIGS[target_variable]['unit']}]"
         if X_CONFIGS[MAIN_X_VARIABLE]['log']:
@@ -171,26 +151,23 @@ def generate_pooled_metric_plots(
             if tick_dist is not None:
                 axes_flat[i].yaxis.set_major_locator(ticker.MultipleLocator(tick_dist))
                 axes_flat[i].yaxis.set_minor_locator(ticker.AutoMinorLocator(2))
-        axes_flat[i].set_xlabel(x_label, fontsize=12)
-        axes_flat[i].set_ylabel(y_label, fontsize=12)
+        axes_flat[i].set_xlabel(x_label, fontsize=14)
+        axes_flat[i].set_ylabel(y_label, fontsize=14)
         if X_CONFIGS[MAIN_X_VARIABLE]["lim"] is not None:
             axes_flat[i].set_xlim(X_CONFIGS[MAIN_X_VARIABLE]["lim"])
         if Y_CONFIGS[target_variable]["lim"] is not None:
             axes_flat[i].set_ylim(Y_CONFIGS[target_variable]["lim"])
-        axes_flat[i].tick_params(axis="y", labelsize=10)
-        axes_flat[i].tick_params(axis="x", labelsize=10)
+        axes_flat[i].tick_params(axis="both", labelsize=12)
         axes_flat[i].grid(True, linestyle="--", alpha=0.6)
-        axes_flat[i].set_title(f"Prediction with {case_name}", fontsize=14, pad=10)
+        axes_flat[i].set_title(f"Prediction with {case_name}", fontsize=16, pad=10)
         axes_flat[i].legend(loc="upper right", fontsize=10, fancybox=True, ncol=2)
 
-    # Save the pooled results figure
     fig.tight_layout(rect=[0, 0.03, 1, 0.95])
     plot_full_path = os.path.join(output_dir, f"{output_name}_{target_variable}.png")
     plt.savefig(plot_full_path, bbox_inches="tight", dpi=600)
     plt.close(fig)
     print(f"Combined plot saved: {plot_full_path}")
 
-    # Save the pooled data to a csv file using pandas
     csv_df = pd.DataFrame(csv_data)
     csv_df = csv_df.groupby(["model", "vram", "nparams", "nbits"]).first().reset_index()
     csv_full_path = os.path.join(output_dir, f"{output_name}_{target_variable}.csv")
@@ -200,33 +177,6 @@ def generate_pooled_metric_plots(
     return plot_full_path, csv_full_path
 
 
-# def fit_error_model_lme(
-#     df_input: pd.DataFrame,
-#     dependent_variable: str="error - all 10 models",
-#     fixed_effect_0: str="nparams",
-#     fixed_effect_1: str="nbits",
-#     include_interaction: bool=True,
-#     random_intercept_group: str="model",
-# ):
-#     """
-#     Fits a linear mixed-effects model to the provided dataframe
-#     """
-#     # Load data
-#     df = df_input.copy()
-#     df.rename(columns={dependent_variable: "target"}, inplace=True)
-
-#     # Correctly define the model formula
-#     if include_interaction:
-#         # The '*' operator includes main effects AND the interaction
-#         model_formula = f"target ~ {fixed_effect_0} * {fixed_effect_1}"
-#     else:
-#         # The '+' operator includes main effects ONLY
-#         model_formula = f"target ~ {fixed_effect_0} + {fixed_effect_1}"
-
-#     # Create and fit the mixed-effects model
-#     md = smf.mixedlm(model_formula, df, groups=df[random_intercept_group])
-#     return md.fit()
-
 def fit_error_model_lme(
     df_input: pd.DataFrame,
     dependent_variable: str = "error - all 10 models",
@@ -235,30 +185,18 @@ def fit_error_model_lme(
     include_interaction: bool = True,
     random_intercept_group: str = "model",
 ):
-    """
-    Fits a linear mixed-effects model to the provided dataframe
-    """
-    # Load data
     df = df_input.copy()
-
-    # Log-transform nparams to account for LLM scaling laws
     df["log_nparams"] = np.log10(df[fixed_effect_0])
-    fe_0_term = "log_nparams"  # update the fixed effect name to use the log version
-    
-    # Keep nbits linear since we take 2, 3, 4, 5, 6, 8 and we have no further hypothesis
+    fe_0_term = "log_nparams"  
     fe_1_term = fixed_effect_1
-    
-    # Keep the target variable linear because no further hypothesis
     df["target"] = df[dependent_variable]
     
-    # Correctly define the model formula
     if include_interaction:
-        model_formula = f"target ~ {fe_0_term} * {fe_1_term}"  # "*" combines "+" and "x"
+        model_formula = f"target ~ {fe_0_term} * {fe_1_term}"
     else:
         model_formula = f"target ~ {fe_0_term} + {fe_1_term}"
-    print(f"Fitting LME with formula: {model_formula}")
+    print(f"\nFitting LME with formula: {model_formula}")
 
-    # Create and fit the mixed-effects model
     md = smf.mixedlm(model_formula, df, groups=df[random_intercept_group])
     return md.fit()
 
@@ -269,20 +207,15 @@ def calculate_bootstrap_ci(
     metric_type: str, 
     n_bootstraps: int = 1000,
 ) -> tuple[float, float]:
-    """
-    Calculate 95% CI (lower_diff, upper_diff) relative to the mean using bootstrapping.
-    """
     y_t = np.array(y_true)
     y_p = np.array(y_pred)
     
-    # Filter out invalid labels (-1)
     mask = y_t != -1
     y_t, y_p = y_t[mask], y_p[mask]
     
     if len(y_t) == 0:
         return 0.0, 0.0
     
-    # Define metric function
     if metric_type == "error":
         metric_func = lambda t, p: np.mean(t != p)
     elif metric_type == "distance":
@@ -290,10 +223,7 @@ def calculate_bootstrap_ci(
     else:
         return 0.0, 0.0
     
-    # Original score
     original_score = metric_func(y_t, y_p)
-    
-    # Bootstrap
     boot_scores = []
     rng = np.random.default_rng(seed=1234)
     indices = np.arange(len(y_t))
@@ -302,19 +232,156 @@ def calculate_bootstrap_ci(
         score = metric_func(y_t[resample_idx], y_p[resample_idx])
         boot_scores.append(score)
     
-    # Get 2.5th and 97.5th percentiles
     lower = np.percentile(boot_scores, 2.5)
     upper = np.percentile(boot_scores, 97.5)
-    
-    # Return distances from the mean (for matplotlib yerr)
     return original_score - lower, upper - original_score
+
+
+def add_model_annotations(ax, df, col_y):
+    """Helper to add bespoke, spread-out arrows for models to avoid overlapping borders and each other."""
+    model_stats = df.groupby('model').agg({'nparams': 'first', col_y: 'mean'}).reset_index()
+    
+    # Hand-tuned (x_offset, y_offset) coordinates to keep labels fully inside the plot 
+    # and safely separated from one another.
+    custom_offsets = {
+        "Qwen3-0.6B": (65, -20),
+        "Qwen3-1.7B": (-50, -40),
+        "Qwen3-4B": (-60, -30),
+        "Qwen3-8B": (-40, -50),
+        "Qwen3-14B": (-20, 50),
+        "Qwen3-32B": (-60, -40),
+        "DS-R1-Distill-Qwen3-32B": (-30, 100),
+        "DS-R1-Distill-Llama-70B": (-30, 40),
+    }
+
+    for idx, row in model_stats.iterrows():
+        model_key = row['model']
+        # Fallback to an alternating pattern if an unexpected model is added
+        x_offset, y_offset = custom_offsets.get(model_key, (50 if idx % 2 == 0 else -50, 60 if idx % 2 == 0 else -60))
+        
+        short_model_name = model_key.replace("DS-R1-Distill-", "DS-")
+        
+        ax.annotate(
+            short_model_name,
+            xy=(row['nparams'], row[col_y]),
+            xytext=(x_offset, y_offset),
+            textcoords='offset points',
+            ha='center',
+            fontsize=12,
+            zorder=5,
+            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="gray", alpha=0.9),
+            arrowprops=dict(arrowstyle="-|>", mutation_scale=20, connectionstyle="arc3,rad=0.25", color="black", lw=1.5, alpha=0.8)
+        )
+
+
+def generate_aggregated_main_effects_plot(
+    csv_error_path: str, 
+    csv_distance_path: str, 
+    output_dir: str,
+    lme_models: dict
+):
+    df_err = pd.read_csv(csv_error_path)
+    df_dist = pd.read_csv(csv_distance_path)
+    
+    df_err['nparams'] = df_err['nparams'].round(1)
+    df_dist['nparams'] = df_dist['nparams'].round(1)
+
+    target_case = "all 10 models"
+    col_err = f"error - {target_case}"
+    col_dist = f"distance - {target_case}"
+
+    if col_err not in df_err.columns or col_dist not in df_dist.columns:
+        print("Warning: Target columns for 'all 10 models' missing. Cannot generate main effects plot.")
+        return
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+    sns.set_theme(style="whitegrid")
+
+    # Fixed explicit ticks for the right column log scale
+    explicit_x_ticks = [0.5, 1, 5, 10, 50]
+
+    # --- ROW 1: ERROR RATE ---
+    coef_err_nbits = lme_models['error'].params['nbits']
+    label_err_nbits = f"LME coeff.: {coef_err_nbits:.3f}"
+    
+    sns.regplot(
+        data=df_err, x='nbits', y=col_err, ax=axes[0, 0], 
+        color='tab:blue', x_estimator=np.mean, x_ci=68,
+        scatter_kws={'s': 70, 'edgecolor': 'white'}, 
+        line_kws={'color': 'black', 'alpha': 0.8, 'linewidth': 2, 'label': label_err_nbits}
+    )
+    axes[0, 0].set_title("Main effect of quantization on error rate", fontsize=16)
+    axes[0, 0].set_ylabel("Error rate [%]", fontsize=14)
+    axes[0, 0].set_xlabel("Bits/param", fontsize=14)
+    axes[0, 0].set_xticks(sorted(df_err['nbits'].dropna().unique()))
+    axes[0, 0].tick_params(axis='both', labelsize=12)
+    axes[0, 0].legend(loc="best", fontsize=10)
+
+    coef_err_nparams = lme_models['error'].params['log_nparams']
+    label_err_nparams = f"LME coeff.: {coef_err_nparams:.3f}"
+
+    sns.regplot(
+        data=df_err, x='nparams', y=col_err, ax=axes[0, 1], 
+        color='tab:orange', logx=True, x_estimator=np.mean, x_ci=68,
+        scatter_kws={'s': 70, 'edgecolor': 'white'}, 
+        line_kws={'color': 'black', 'alpha': 0.8, 'linewidth': 2, 'label': label_err_nparams}
+    )
+    axes[0, 1].set_xscale('log')
+    axes[0, 1].set_xticks(explicit_x_ticks)
+    axes[0, 1].get_xaxis().set_major_formatter(ticker.ScalarFormatter())
+    axes[0, 1].set_title("Main effect of model size on error rate", fontsize=16)
+    axes[0, 1].set_ylabel("Error rate [%]", fontsize=14)
+    axes[0, 1].set_xlabel("Number of parameters (billion) - Log scale", fontsize=14)
+    axes[0, 1].tick_params(axis='both', labelsize=12)
+    axes[0, 1].legend(loc="best", fontsize=10)
+    add_model_annotations(axes[0, 1], df_err, col_err)
+
+    # --- ROW 2: DISTANCE ---
+    coef_dist_nbits = lme_models['distance'].params['nbits']
+    label_dist_nbits = f"LME coeff.: {coef_dist_nbits:.3f}"
+
+    sns.regplot(
+        data=df_dist, x='nbits', y=col_dist, ax=axes[1, 0], 
+        color='tab:green', x_estimator=np.mean, x_ci=68,
+        scatter_kws={'s': 70, 'edgecolor': 'white'}, 
+        line_kws={'color': 'black', 'alpha': 0.8, 'linewidth': 2, 'label': label_dist_nbits}
+    )
+    axes[1, 0].set_title("Main effect of quantization on distance", fontsize=16)
+    axes[1, 0].set_ylabel("Distance [mRS unit]", fontsize=14)
+    axes[1, 0].set_xlabel("Bits/param", fontsize=14)
+    axes[1, 0].set_xticks(sorted(df_dist['nbits'].dropna().unique()))
+    axes[1, 0].tick_params(axis='both', labelsize=12)
+    axes[1, 0].legend(loc="best", fontsize=10)
+
+    coef_dist_nparams = lme_models['distance'].params['log_nparams']
+    label_dist_nparams = f"LME coeff.: {coef_dist_nparams:.3f}"
+
+    sns.regplot(
+        data=df_dist, x='nparams', y=col_dist, ax=axes[1, 1], 
+        color='tab:red', logx=True, x_estimator=np.mean, x_ci=68,
+        scatter_kws={'s': 70, 'edgecolor': 'white'}, 
+        line_kws={'color': 'black', 'alpha': 0.8, 'linewidth': 2, 'label': label_dist_nparams}
+    )
+    axes[1, 1].set_xscale('log')
+    axes[1, 1].set_xticks(explicit_x_ticks)
+    axes[1, 1].get_xaxis().set_major_formatter(ticker.ScalarFormatter())
+    axes[1, 1].set_title("Main effect of model size on distance", fontsize=16)
+    axes[1, 1].set_ylabel("Distance [mRS unit]", fontsize=14)
+    axes[1, 1].set_xlabel("Number of parameters (billion) - Log scale", fontsize=14)
+    axes[1, 1].tick_params(axis='both', labelsize=12)
+    axes[1, 1].legend(loc="best", fontsize=10)
+    add_model_annotations(axes[1, 1], df_dist, col_dist)
+
+    fig.tight_layout(pad=3.0)
+    out_path = os.path.join(output_dir, f"{OUTPUT_NAME}_main_effects_aggregated.png")
+    plt.savefig(out_path, bbox_inches="tight", dpi=600)
+    plt.close(fig)
+    print(f"Aggregated main effects plot saved: {out_path}")
 
 
 if __name__ == "__main__":
 
-    # Define paths to all plotted models
     result_path_group = {
-
         "Qwen3-0.6B": [
             "unsloth/Qwen3-0.6B-GGUF-Q2_K_XL.json",
             "unsloth/Qwen3-0.6B-GGUF-Q3_K_XL.json",
@@ -322,9 +389,7 @@ if __name__ == "__main__":
             "unsloth/Qwen3-0.6B-GGUF-Q5_K_XL.json",
             "unsloth/Qwen3-0.6B-GGUF-Q6_K_XL.json",
             "unsloth/Qwen3-0.6B-GGUF-Q8_0.json",
-            # "Qwen/Qwen3-0.6B-FP8-no_quant_scheme.json",
         ],
-
         "Qwen3-1.7B": [
             "unsloth/Qwen3-1.7B-GGUF-Q2_K_XL.json",
             "unsloth/Qwen3-1.7B-GGUF-Q3_K_XL.json",
@@ -332,9 +397,7 @@ if __name__ == "__main__":
             "unsloth/Qwen3-1.7B-GGUF-Q5_K_XL.json",
             "unsloth/Qwen3-1.7B-GGUF-Q6_K_XL.json",
             "unsloth/Qwen3-1.7B-GGUF-Q8_0.json",
-            # "Qwen/Qwen3-1.7B-FP8-no_quant_scheme.json",
         ],
-
         "Qwen3-4B": [
             "unsloth/Qwen3-4B-GGUF-Q2_K_XL.json",
             "unsloth/Qwen3-4B-GGUF-Q3_K_XL.json",
@@ -342,10 +405,7 @@ if __name__ == "__main__":
             "unsloth/Qwen3-4B-GGUF-Q5_K_XL.json",
             "unsloth/Qwen3-4B-GGUF-Q6_K_XL.json",
             "unsloth/Qwen3-4B-GGUF-Q8_0.json",
-            # "Qwen/Qwen3-4B-AWQ-no_quant_scheme.json",
-            # "Qwen/Qwen3-4B-FP8-no_quant_scheme.json",
         ],
-
         "Qwen3-8B": [
             "unsloth/Qwen3-8B-GGUF-Q2_K_XL.json",
             "unsloth/Qwen3-8B-GGUF-Q3_K_XL.json",
@@ -353,10 +413,7 @@ if __name__ == "__main__":
             "unsloth/Qwen3-8B-GGUF-Q5_K_XL.json",
             "unsloth/Qwen3-8B-GGUF-Q6_K_XL.json",
             "unsloth/Qwen3-8B-GGUF-Q8_0.json",
-            # "Qwen/Qwen3-8B-AWQ-no_quant_scheme.json",
-            # "Qwen/Qwen3-8B-FP8-no_quant_scheme.json",
         ],
-
         "Qwen3-14B": [
             "unsloth/Qwen3-14B-GGUF-Q2_K_XL.json",
             "unsloth/Qwen3-14B-GGUF-Q3_K_XL.json",
@@ -364,10 +421,7 @@ if __name__ == "__main__":
             "unsloth/Qwen3-14B-GGUF-Q5_K_XL.json",
             "unsloth/Qwen3-14B-GGUF-Q6_K_XL.json",
             "unsloth/Qwen3-14B-GGUF-Q8_0.json",
-            # "Qwen/Qwen3-14B-AWQ-no_quant_scheme.json",
-            # "Qwen/Qwen3-14B-FP8-no_quant_scheme.json",
         ],
-
         "Qwen3-32B": [
             "unsloth/Qwen3-32B-GGUF-Q2_K_XL.json",
             "unsloth/Qwen3-32B-GGUF-Q3_K_XL.json",
@@ -375,10 +429,7 @@ if __name__ == "__main__":
             "unsloth/Qwen3-32B-GGUF-Q5_K_XL.json",
             "unsloth/Qwen3-32B-GGUF-Q6_K_XL.json",
             "unsloth/Qwen3-32B-GGUF-Q8_0.json",
-            # "Qwen/Qwen3-32B-AWQ-no_quant_scheme.json",
-            # "Qwen/Qwen3-32B-FP8-no_quant_scheme.json",
         ],
-
         "DS-R1-Distill-Qwen3-32B": [
             "unsloth/DeepSeek-R1-Distill-Qwen-32B-GGUF-Q2_K_L.json",
             "unsloth/DeepSeek-R1-Distill-Qwen-32B-GGUF-Q3_K_M.json",
@@ -387,8 +438,6 @@ if __name__ == "__main__":
             "unsloth/DeepSeek-R1-Distill-Qwen-32B-GGUF-Q6_K.json",
             "unsloth/DeepSeek-R1-Distill-Qwen-32B-GGUF-Q8_0.json",
         ],
-        
-        
         "DS-R1-Distill-Llama-70B": [
             "unsloth/DeepSeek-R1-Distill-Llama-70B-GGUF-Q2_K_XL.json",
             "unsloth/DeepSeek-R1-Distill-Llama-70B-GGUF-Q3_K_XL.json",
@@ -397,29 +446,37 @@ if __name__ == "__main__":
             "unsloth/DeepSeek-R1-Distill-Llama-70B-GGUF-Q6_K_XL.json",
             "unsloth/DeepSeek-R1-Distill-Llama-70B-GGUF-Q8_0.json",
         ],
-
     }
 
-    # Prepend input directory to all result paths
     result_path_group = {
         group: [os.path.join(INPUT_DIR, path) for path in paths]
         for group, paths in result_path_group.items()
     }
 
-    # Do a full analysis for all required target variables
+    generated_csvs = {}
+    lme_models = {}
+
     for target_variable in TARGET_VARIABLES:
         
-        # Pool results and plot them
         output_png_path, output_csv_path = generate_pooled_metric_plots(
             result_path_group,
             output_name=OUTPUT_NAME,
             output_dir=OUTPUT_DIR,
             target_variable=target_variable,
         )
+        generated_csvs[target_variable] = output_csv_path
 
-        # Identify statistical patterns using linear mixed-effects models
         lme_results = fit_error_model_lme(
             df_input=pd.read_csv(output_csv_path),
             dependent_variable=f"{target_variable} - all 10 models",
         )
         print(lme_results.summary())
+        lme_models[target_variable] = lme_results
+
+    if "error" in generated_csvs and "distance" in generated_csvs:
+        generate_aggregated_main_effects_plot(
+            csv_error_path=generated_csvs["error"],
+            csv_distance_path=generated_csvs["distance"],
+            output_dir=OUTPUT_DIR,
+            lme_models=lme_models
+        )
