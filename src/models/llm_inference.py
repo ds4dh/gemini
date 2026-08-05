@@ -1,24 +1,26 @@
+import asyncio
 import json
 import time
-import asyncio
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-from transformers import AutoModelForCausalLM
+from functools import partial
+from typing import Any, Optional, Type
+
 from datasets import Dataset
+from pydantic import BaseModel
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tqdm import tqdm
+from transformers import AutoModelForCausalLM
+
 try:
-    from vllm import LLM, SamplingParams, RequestOutput
+    from vllm import LLM, RequestOutput, SamplingParams
     from vllm.sampling_params import StructuredOutputsParams
 except ImportError:
     LLM, SamplingParams, RequestOutput, StructuredOutputsParams = None, None, None, None
+
 try:
-    from openai import OpenAI, AsyncOpenAI, InternalServerError
+    from openai import AsyncOpenAI, InternalServerError, OpenAI
 except ImportError:
     OpenAI, AsyncOpenAI, InternalServerError = None, None, Exception
-from typing import Any, Type, Optional
-from pydantic import BaseModel
-from tqdm import tqdm
-from tqdm.asyncio import tqdm as anext
-from functools import partial
-from src.data.prompting import build_prompt
+
 from src.data.output_guiding import extract_structured_output, resolve_schema_model
 
 

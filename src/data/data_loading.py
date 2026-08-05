@@ -1,7 +1,9 @@
-import os
 import argparse
+import os
+
 import pandas as pd
 from datasets import Dataset
+
 from src.data.encryption import read_pandas_from_encrypted_file
 
 

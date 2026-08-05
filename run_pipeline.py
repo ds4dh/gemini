@@ -1,31 +1,28 @@
-import os
-import gc
-import sys
-import yaml
-import shutil
-import datetime
 import argparse
-import pandas as pd
-from typing import Any
+import datetime
+import gc
+import os
+import shutil
+import sys
 from functools import partial
 
-# Distributed environment setup
-from src.utils.run_utils import set_distributed_environment, load_config_files, clean_model_cache
-set_distributed_environment()
-
+import pandas as pd
 import torch
-from datasets import Dataset
 
-from src.models.llm_loader import load_model
-from src.models.llm_inference import process_samples
-from src.data.prompting import build_messages
 from src.data.data_loading import load_data_formatted_for_benchmarking
+from src.data.prompting import build_messages
+from src.models.llm_evaluation import generate_extraction_summary_and_reports
+from src.models.llm_inference import process_samples
+from src.models.llm_loader import load_model
+from src.utils.run_utils import load_config_files, set_distributed_environment
 
 
 def main():
     """
     Main entrypoint for the Gemini Clinical Variable Extraction Pipeline.
     """
+    set_distributed_environment()
+
     parser = argparse.ArgumentParser(
         description="Unified Clinical Variable Extraction Pipeline using LLMs."
     )
@@ -190,7 +187,6 @@ def main():
         df_results.to_csv(detailed_csv_path, index=False)
 
         # Generate consensus summary database & evaluation reports (JSON & MD)
-        from src.models.llm_evaluation import generate_extraction_summary_and_reports
         summary_df, report_json = generate_extraction_summary_and_reports(df_results, cfg, run_dir)
 
         print("\n================================================================")
