@@ -2,16 +2,21 @@ import os
 import math
 import numpy as np
 import torch
-import xgrammar as xgr
-from typing import Any
-from enum import Enum, auto
-from dataclasses import dataclass, field
-from vllm.config import VllmConfig
-from vllm.v1.sample.logits_processor import (
-    BatchUpdate,
-    LogitsProcessor,
-    MoveDirectionality,
-)
+try:
+    import xgrammar as xgr
+except ImportError:
+    xgr = None
+
+try:
+    from vllm.config import VllmConfig
+    from vllm.v1.sample.logits_processor import (
+        BatchUpdate,
+        LogitsProcessor,
+        MoveDirectionality,
+    )
+except ImportError:
+    VllmConfig, BatchUpdate, MoveDirectionality = None, None, None
+    class LogitsProcessor: pass
 from transformers import AutoTokenizer, PreTrainedTokenizer
 
 

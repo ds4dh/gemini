@@ -4,17 +4,22 @@ import asyncio
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from transformers import AutoModelForCausalLM
 from datasets import Dataset
-# from llama_cpp import Llama
-from vllm import LLM, SamplingParams, RequestOutput
-from openai import OpenAI, AsyncOpenAI, InternalServerError
+try:
+    from vllm import LLM, SamplingParams, RequestOutput
+    from vllm.sampling_params import StructuredOutputsParams
+except ImportError:
+    LLM, SamplingParams, RequestOutput, StructuredOutputsParams = None, None, None, None
+try:
+    from openai import OpenAI, AsyncOpenAI, InternalServerError
+except ImportError:
+    OpenAI, AsyncOpenAI, InternalServerError = None, None, Exception
+from typing import Any, Type, Optional
+from pydantic import BaseModel
 from tqdm import tqdm
 from tqdm.asyncio import tqdm as anext
-from typing import Any, Type
 from functools import partial
-from pydantic import BaseModel
-from vllm.sampling_params import StructuredOutputsParams
 from src.data.prompting import build_prompt
-from src.data.output_guiding import extract_structured_output, SCHEMA_REGISTRY
+from src.data.output_guiding import extract_structured_output, resolve_schema_model
 
 
 def _infer_vllm(
@@ -286,14 +291,8 @@ def process_samples(
     Run inference on dataset samples using vLLM, llama-cpp, or HuggingFace backends.
     """
     # Retrieve output schema if requested (to guide LLM inference)
-    output_schema_model = None
-    if output_schema_name is not None:
-        output_schema_model = SCHEMA_REGISTRY.get(output_schema_name)
-        if output_schema_model is None:
-            raise ValueError(
-                f"Schema '{output_schema_name}' not found in registry. "
-                f"Available schemas are: {list(SCHEMA_REGISTRY.keys())}"
-            )
+    schema_arg = kwargs.get("schema") or kwargs.get("schema_config") or output_schema_name
+    output_schema_model = resolve_schema_model(schema_arg)
 
     # Define arguments for model inference 
     infer_args = {
@@ -315,7 +314,10 @@ def process_samples(
         case "vllm-serve": output_texts = _infer_vllm_serve(**infer_args)
         case "llama-cpp": output_texts = _infer_llama_cpp(**infer_args)
         case "vllm-serve-async": output_texts = asyncio.run(_infer_vllm_serve_async(**infer_args))
+        case "transformers": output_texts = _infer_transformers(**infer_args)
+        case "mock": output_texts = _infer_mock(**infer_args)
         case _: raise ValueError(f"Unknown inference backend: {inference_backend}")
+
 
     # Extract data using the model and required inference backend
     transposed_output_texts = list(zip(*output_texts))
@@ -356,3 +358,94 @@ def _map_and_structure_output(
 
     # Add the inference index to make column names unique
     return {f"{k}_{inference_idx:03d}": v for k, v in structured_dict.items()}
+
+
+def _infer_transformers(
+    model: Any,
+    dataset: Dataset,
+    n_inference_repeats: int,
+    max_new_tokens: int,
+    temperature: float = 0.1,
+    top_p: float = 0.9,
+    output_schema_model: Type[BaseModel] | None = None,
+    use_output_guide: bool = False,
+    *args, **kwargs,
+) -> list[list[str]]:
+    """
+    Runs inference using PyTorch / HuggingFace Transformers directly.
+    """
+    if isinstance(model, tuple):
+        model_obj, tokenizer = model
+    else:
+        model_obj, tokenizer = model, None
+
+    # Check for XGrammar logits processor support in Transformers
+    hf_logits_processor = None
+    if use_output_guide and output_schema_model is not None:
+        try:
+            import xgrammar as xgr
+            compiler = xgr.GrammarCompiler(xgr.TokenizerInfo.from_huggingface(tokenizer))
+            compiled_grammar = compiler.compile_json_schema(json.dumps(output_schema_model.model_json_schema()))
+            hf_logits_processor = [xgr.contrib.hf.LogitsProcessor(compiled_grammar)]
+        except Exception:
+            hf_logits_processor = None
+
+    all_outputs = []
+    for messages in tqdm(dataset["messages"], desc="Generating HuggingFace predictions"):
+        prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = tokenizer(prompt, return_tensors="pt").to(model_obj.device)
+        
+        sample_outputs = []
+        for _ in range(n_inference_repeats):
+            do_sample = temperature > 0.0
+            gen_kwargs = {
+                "max_new_tokens": max_new_tokens,
+                "do_sample": do_sample,
+                "pad_token_id": tokenizer.pad_token_id,
+            }
+            if do_sample:
+                gen_kwargs["temperature"] = temperature
+                gen_kwargs["top_p"] = top_p
+            if hf_logits_processor is not None:
+                gen_kwargs["logits_processor"] = hf_logits_processor
+
+            outputs = model_obj.generate(**inputs, **gen_kwargs)
+            generated_tokens = outputs[0][inputs["input_ids"].shape[1]:]
+            text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
+            sample_outputs.append(text.strip())
+        all_outputs.append(sample_outputs)
+
+    return all_outputs
+
+
+def _infer_mock(
+    model: Any,
+    dataset: Dataset,
+    n_inference_repeats: int,
+    output_schema_model: Type[BaseModel] | None = None,
+    *args, **kwargs,
+) -> list[list[str]]:
+    """
+    Simulates LLM inference for fast offline verification.
+    """
+    mock_dict = {}
+    if output_schema_model:
+        for fname, ffield in output_schema_model.model_fields.items():
+            if fname.lower() == "mrs":
+                mock_dict[fname] = 1
+            elif "smoke" in fname.lower() or "smoking" in fname.lower():
+                mock_dict[fname] = "Non-smoker"
+            elif "aneurysm" in fname.lower() or "size" in fname.lower():
+                mock_dict[fname] = 5.5
+            else:
+                mock_dict[fname] = "Sample extracted info"
+
+    mock_json = json.dumps(mock_dict, indent=2)
+
+    all_outputs = []
+    for _ in dataset["messages"]:
+        sample_outputs = [mock_json for _ in range(n_inference_repeats)]
+        all_outputs.append(sample_outputs)
+
+    return all_outputs
+

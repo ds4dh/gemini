@@ -1,4 +1,5 @@
 import os
+import sys
 import re
 import time
 import httpx
@@ -6,9 +7,15 @@ import psutil
 import socket
 import subprocess
 import torch
-from vllm import LLM
+try:
+    from vllm import LLM
+except ImportError:
+    LLM = None
 # from llama_cpp import Llama
-from openai import OpenAI, AsyncOpenAI
+try:
+    from openai import OpenAI, AsyncOpenAI
+except ImportError:
+    OpenAI, AsyncOpenAI = None, None
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from huggingface_hub import list_repo_files, HfApi, snapshot_download, hf_hub_download
 from warnings import warn
@@ -82,7 +89,7 @@ def _load_model_vllm_server(
         model_path = download_gguf_by_quant(model_path, quant_scheme)
 
     # Build the server command declaratively
-    cmd = ["python", "-m", "vllm.entrypoints.openai.api_server"]
+    cmd = [sys.executable, "-m", "vllm.entrypoints.openai.api_server"]
     if port is None: port = find_free_port()
     params = {
         # Server configuration
@@ -215,9 +222,46 @@ def load_model(
         case "vllm-serve": model, server_process = _load_model_vllm_server(**load_args)
         case "vllm-serve-async": model, server_process = _load_model_vllm_server(async_mode=True, **load_args)
         case "llama-cpp": model = _load_model_llama_cpp(**load_args)
+        case "transformers": model = _load_model_transformers(**load_args)
+        case "mock": model = _load_model_mock(**load_args)
         case _: raise ValueError(f"Unknown inference backend: {inference_backend}")
 
     return model, server_process
+
+
+def _load_model_transformers(model_path: str, *args, **kwargs):
+    """Load model using standard PyTorch / HuggingFace Transformers for desktop local inference."""
+    print(f"Loading HuggingFace model and tokenizer: {model_path}")
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch_dtype,
+            device_map="auto",
+            trust_remote_code=True,
+        )
+    except Exception as e:
+        print(f"Notice: device_map='auto' failed ({e}). Loading directly to '{device}'...")
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch_dtype,
+            trust_remote_code=True,
+        ).to(device)
+
+    return (model, tokenizer)
+
+
+def _load_model_mock(*args, **kwargs):
+    """Load mock model for fast offline testing."""
+    print("Mock inference backend initialized.")
+    return ("mock_model", None)
+
 
 
 def get_tokenizer_name(

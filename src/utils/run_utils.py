@@ -13,35 +13,41 @@ def add_model_arguments(parser: ArgumentParser) -> None:
     """
     model_group = parser.add_argument_group(
         title="Model configuration",
-        description="Configuration options for model benchmarking",
+        description="Configuration options for model benchmarking and extraction",
+    )
+
+    model_group.add_argument(
+        "-c", "--config", "--config-path",
+        default="config.yaml",
+        help="Path to the primary unified configuration file (default: config.yaml)"
     )
 
     model_group.add_argument(
         "-mc", "--model-config-path",
-        default="configs/model_config.yaml",
-        help="Path to the model configuration file"
+        default=None,
+        help="Legacy model config path (optional)"
     )
 
     model_group.add_argument(
         "-pc", "--prompt-config-path",
-        default="configs/prompt_config.yaml",
-        help="Path to the prompt configuration file"
+        default=None,
+        help="Legacy prompt config path (optional)"
     )
 
 
 def add_data_arguments(parser: ArgumentParser) -> None:
     """
-    Add arguments required for reading an encrypted file by fetching a remote key.
+    Add arguments required for dataset access.
     """
     data_group = parser.add_argument_group(
         title="Data access and remote env configuration",
-        description="Arguments for the local encrypted file and key identifier."
+        description="Arguments for local/remote dataset access and encryption."
     )
 
     data_group.add_argument(
         "-dc", "--data-config-path",
-        default="configs/data_config.yaml",
-        help="Path to the data configuration file"
+        default=None,
+        help="Legacy data config path (optional)"
     )
 
     data_group.add_argument(
@@ -115,17 +121,100 @@ def _load_config_from_yaml(config_file_path: str) -> dict:
 
 
 def load_config_files(script_args) -> dict:
-    """ Load configurations from YAML files specified in script_args
+    """ Load configurations from unified single YAML file or legacy split YAML files specified in script_args
     """
-    # Load configurations
-    model_config = _load_config_from_yaml(script_args.model_config_path)
-    data_config = _load_config_from_yaml(script_args.data_config_path)
-    prompt_config = _load_config_from_yaml(script_args.prompt_config_path)
+    # Check if a single unified config file path is provided
+    single_config_path = getattr(script_args, "config", None) or getattr(script_args, "config_path", None)
 
-    # Combine all configurations into a single dictionary
+    if single_config_path and os.path.exists(single_config_path):
+        print(f"Loading unified configuration from: {single_config_path}")
+        raw_cfg = _load_config_from_yaml(single_config_path)
+        return normalize_pipeline_config(raw_cfg)
+
+    # Legacy fallback: Load configurations from separate YAML files
+    model_config_path = getattr(script_args, "model_config_path", "configs/model_config.yaml")
+    data_config_path = getattr(script_args, "data_config_path", "configs/data_config.yaml")
+    prompt_config_path = getattr(script_args, "prompt_config_path", "configs/prompt_config.yaml")
+
+    model_config = _load_config_from_yaml(model_config_path) if os.path.exists(model_config_path) else {}
+    data_config = _load_config_from_yaml(data_config_path) if os.path.exists(data_config_path) else {}
+    prompt_config = _load_config_from_yaml(prompt_config_path) if os.path.exists(prompt_config_path) else {}
+
     run_config = {**model_config, **data_config, **prompt_config}
+    return normalize_pipeline_config(run_config)
 
-    return run_config
+
+def normalize_pipeline_config(raw_cfg: dict) -> dict:
+    """
+    Normalizes and flattens unified or legacy configuration dicts so all modules
+    can access parameters reliably via top-level keys or nested sections.
+    """
+    cfg = raw_cfg.copy()
+
+    # Extract nested sections if present
+    model_section = cfg.get("model", {})
+    data_section = cfg.get("data", {})
+    prompt_section = cfg.get("prompt", {})
+    output_section = cfg.get("output", {})
+    schema_section = cfg.get("schema", {})
+
+    # Flatten nested parameters into top-level dict for backwards compatibility
+    for section in (model_section, data_section, prompt_section, output_section):
+        if isinstance(section, dict):
+            for k, v in section.items():
+                if k not in cfg or cfg[k] is None:
+                    cfg[k] = v
+
+    # Normalize prompt template structures
+    if "prompt_templates" not in cfg:
+        cfg["prompt_templates"] = {
+            "system_template": prompt_section.get("system_template") or cfg.get("system_template") or "{task_description}\n{domain_knowledge}\n{output_specifications}",
+            "user_template": prompt_section.get("user_template") or cfg.get("user_template") or "Voici le texte d'entrée:\nDEBUT DU TEXTE:\n{input_text}\nFIN DU TEXTE",
+        }
+
+    if "context_data" not in cfg:
+        cfg["context_data"] = prompt_section.get("context_data") or cfg.get("context_data") or {
+            "task_description": "Tu es un expert médical.",
+            "domain_knowledge": "",
+            "output_specifications": "",
+        }
+
+    # Normalize schema
+    if "schema" not in cfg and "output_schema_name" in cfg:
+        cfg["schema"] = cfg["output_schema_name"]
+    elif "schema" in cfg:
+        cfg["schema_config"] = schema_section
+        if isinstance(schema_section, dict) and "name" in schema_section:
+            cfg["output_schema_name"] = schema_section["name"]
+
+    # Normalize default data loading arguments
+    if "data_loading_arguments" not in cfg:
+        cfg["data_loading_arguments"] = {
+            "use_curated_dataset": cfg.get("use_curated_dataset", False),
+            "add_curated_dataset": cfg.get("add_curated_dataset", False),
+            "remove_samples_without_label": cfg.get("remove_samples_without_label", False),
+            "sample_small_dataset": cfg.get("sample_small_dataset", False),
+            "min_samples_per_class": cfg.get("min_samples_per_class", 15),
+        }
+
+    # Defaults for essential fields
+    cfg.setdefault("result_dir", "./results")
+    cfg.setdefault("resume_previous_run", True)
+    cfg.setdefault("save_chunk_size", 100)
+    cfg.setdefault("inference_backend", "transformers")
+    cfg.setdefault("model_path", "Qwen/Qwen2.5-0.5B-Instruct")
+    cfg.setdefault("quant_scheme", None)
+    cfg.setdefault("n_inference_repeats", 1)
+    cfg.setdefault("enable_thinking", False)
+    cfg.setdefault("max_thinking_tokens", None)
+    cfg.setdefault("max_new_tokens", 512)
+    cfg.setdefault("temperature", 0.1)
+    cfg.setdefault("top_p", 0.9)
+    cfg.setdefault("use_output_guide", False)
+    cfg.setdefault("delete_model_cache_after_run", False)
+
+    return cfg
+
 
 
 def extract_quant_method(

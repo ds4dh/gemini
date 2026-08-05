@@ -1,71 +1,179 @@
-# Structured data extraction from clinical text
+# GEMINI: Clinical Text Variable Extraction Pipeline
 
-This project uses generative Large Language Models (LLMs) with `vllm` to extract medical concepts from clinical text.
+`gemini` is a flexible, high-performance data extraction pipeline built to extract structured clinical variables from free-form medical text (such as discharge letters, consultation notes, and imaging reports) to construct databases for digital twin models.
 
-## Setup and installation
+---
 
-You can set up the environment locally for development or build a container for reproducible execution on an HPC cluster.
+## Features
 
-### Local development setup
+- **Single-File Configuration (`config.yaml`)**: Manage target extraction variables, prompt templates, model selection, inference backends, and output paths from a single configuration file.
+- **Dynamic Schema Engine**: Automatically generates Pydantic validation schemas at runtime based on field specifications (e.g., Modified Rankin Scale score `mRS`, `smoking_status`, `aneurysm_size_mm`, or custom clinical parameters).
+- **Multi-Backend Inference**:
+  - `transformers`: Local PyTorch inference using HuggingFace models.
+  - `vllm` / `vllm-serve-async`: High-throughput GPU inference engine for desktop and HPC environments.
+  - `mock`: Instant offline execution mode for verifying pipeline logic and prompt structure.
+- **Cross-Platform Compatibility**: Fully supported on Windows desktop environments and Linux HPC clusters with Apptainer/Singularity container support.
 
-For local development, we use `uv` for fast dependency management, reading configuration directly from `pyproject.toml`.
+---
 
-1.  **Install `uv`**
+## Installation & Environment Setup
 
-    If you don't have `uv` installed, you can install it with:
-    ```bash
-    # On macOS and Linux
-    curl -LsSf [https://astral.sh/uv/install.sh](https://astral.sh/uv/install.sh) | sh
-    ```
+### 1. Local Development Setup (`uv`)
 
-2.  **Create a virtual environment and install dependencies**
+Dependency management and environment isolation are handled via `uv`.
 
-    From the root of the project, run the following commands to create the environment and install the project in "editable" mode (changes to code reflect immediately):
-    ```bash
-    uv venv
-    source .venv/bin/activate
-    uv pip install -e .
-    ```
-    *Note: This installs dependencies defined in `pyproject.toml`.*
+#### Install `uv`
+- **Windows (PowerShell)**:
+  ```powershell
+  powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+  ```
+- **Linux / macOS**:
+  ```bash
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  ```
 
-### HPC setup using Apptainer
-
-For running experiments on an HPC cluster, an Apptainer (formerly Singularity) container is used to ensure a consistent and reproducible environment.
-
-1.  **Prerequisites**
-
-    -   Access to an HPC cluster with Apptainer/Singularity installed.
-    -   A SLURM workload manager.
-
-2.  **Build the Container image**
-
-    The `research-env.def` file defines the container environment. It sets up a virtual environment and installs the project and dependencies via `pyproject.toml`.
-
-    To build the image, submit the build script to the SLURM scheduler:
-
-    ```bash
-    sbatch research-env.sbatch
-    ```
-
-    This script will:
-    -   Build the Apptainer image (e.g., `research-env.sif`) from `research-env.def`.
-    -   Store build logs in `build/logs/`.
-
-## Usage
-
-Once the setup is complete, you can run your experiments.
-
-### Running experiments locally
-
-Make sure your virtual environment is activated:
+#### Create Virtual Environment & Install Dependencies
+Run the following commands from the repository root:
 ```bash
-source .venv/bin/activate
-./experiments/experiment_1_desktop.sh  # check parameters in this file first
+# Create virtual environment
+uv venv
+
+# Activate environment:
+# PowerShell (Windows): .venv\Scripts\Activate.ps1
+# Command Prompt (cmd): .venv\Scripts\activate.bat
+# Linux / macOS:        source .venv/bin/activate
+
+# Install dependencies in editable mode
+uv pip install -e .
 ```
 
-### Running experiments on HPC
+*Note for Windows vLLM installation*:
+Standard local execution on Windows uses the `transformers` or `mock` backends. To run `vllm` natively on Windows, download the matching `.whl` binary wheel from [SystemPanic/vllm-windows Releases](https://github.com/SystemPanic/vllm-windows/releases) and install it using:
+```powershell
+uv pip install path/to/downloaded/vllm-0.26.0+cu132-cp312-cp312-win_amd64.whl --extra-index-url https://download.pytorch.org/whl/cu130
+```
 
-To run the experiment from an HPC, use the following script:
+---
+
+### 2. HPC Cluster Setup (Apptainer / Singularity)
+
+For execution on HPC environments (e.g., Baobab / Bamboo with Slurm):
+
+Submit the container build script to Slurm to generate `research-env.sif`:
 ```bash
-./experiments/experiment_1.sh  # after checking the parameters in this file
+sbatch research-env.sbatch
+```
+
+---
+
+## Usage Guide
+
+### 1. Pipeline Execution (`run_pipeline.py`)
+
+Run the pipeline using `config.yaml`:
+
+#### Offline Test Run (Mock Backend)
+```bash
+python run_pipeline.py --config config.yaml --backend mock
+```
+
+#### Local Desktop Inference (HuggingFace Transformers Backend)
+```bash
+python run_pipeline.py --config config.yaml --backend transformers --model Qwen/Qwen2.5-0.5B-Instruct
+```
+
+#### High-Throughput GPU Inference (vLLM Backend)
+```bash
+python run_pipeline.py --config config.yaml --backend vllm
+```
+
+---
+
+### 2. Target Variable Configuration
+
+Target clinical fields are defined under `schema.fields` in `config.yaml`:
+
+```yaml
+schema:
+  name: "ClinicalVariablesExtractionSchema"
+  fields:
+    mRS:
+      type: "int"
+      description: "Modified Rankin Scale score (0 to 6, or -1 if unmentioned)"
+      ge: -1
+      le: 6
+      default: -1
+
+    smoking_status:
+      type: "enum"
+      description: "Patient smoking status"
+      enum_values: ["Smoker", "Non-smoker", "Former-smoker", "Unknown"]
+      default: "Unknown"
+
+    aneurysm_size_mm:
+      type: "float"
+      description: "Maximal intracranial aneurysm diameter in mm, or null if none"
+      default: null
+```
+
+---
+
+### 3. Dynamic CLI Overrides
+
+Override configuration parameters via command-line arguments without modifying `config.yaml`:
+
+```bash
+python run_pipeline.py \
+    --config config.yaml \
+    --model "unsloth/Qwen3-8B-GGUF" \
+    --quant-scheme "Q6_K_XL" \
+    --backend "vllm-serve-async" \
+    --gpu-memory-utilization 0.90 \
+    --input-path "data/synthetic_clinical_notes.csv" \
+    --output-dir "./results"
+```
+
+---
+
+### 4. Running Multi-Model Experiment Batches
+
+- **Local Batch Runs**:
+  ```bash
+  ./experiments/experiment_curated.sh
+  ```
+- **HPC Slurm Batch Runs**:
+  ```bash
+  ./experiments/experiment_1.sh
+  ```
+
+---
+
+## Synthetic Test Data Generation
+
+Generate a synthetic clinical dataset (containing sample clinical notes and ground truth labels) for offline testing:
+
+```bash
+python scripts/generate_synthetic_data.py
+```
+Outputs `data/synthetic_clinical_notes.csv`.
+
+---
+
+## Repository Structure
+
+```
+gemini/
+├── config.yaml                # Primary configuration file
+├── run_pipeline.py            # Primary CLI entrypoint script
+├── pyproject.toml             # Project dependencies and packaging metadata
+├── data/                      # Input datasets and synthetic clinical notes
+│   └── synthetic_clinical_notes.csv
+├── results/                   # Output extracted CSV databases
+│   └── extracted_clinical_database.csv
+├── src/
+│   ├── data/                  # Schema engine, prompting, data loading
+│   ├── models/                # LLM loaders and inference backends
+│   └── utils/                 # Environment and configuration utilities
+├── scripts/                   # Utility scripts (synthetic data, benchmarking)
+└── experiments/               # Experiment execution scripts
 ```

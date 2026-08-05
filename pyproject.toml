@@ -22,8 +22,8 @@ classifiers = [
 
 # Dependencies (uv pip install -e .)
 dependencies = [
-    "vllm==0.15.1",
-    "flashinfer-python",
+    "vllm==0.15.1; sys_platform != 'win32'",
+    "flashinfer-python; sys_platform != 'win32'",
     "transformers",
     "datasets",
     "huggingface_hub",
@@ -41,6 +41,8 @@ dependencies = [
     "paramiko",
     "cryptography",
     "python-dotenv",
+    "openai",
+    "accelerate",
 ]
 
 # Project links

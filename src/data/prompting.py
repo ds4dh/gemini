@@ -18,8 +18,8 @@ def build_messages(
     user_template: str = cfg["prompt_templates"]["user_template"]
     context_data: dict[str, str] = cfg["context_data"]
 
-    # Update contextual data if thinking mode is not enabled
-    if cfg["enable_thinking"] == False:
+    # Update contextual data if thinking mode is not enabled and alternative prompt context is provided
+    if cfg.get("enable_thinking") is False and "context_data_no_thinking" in cfg:
         context_data_no_thinking = cfg["context_data_no_thinking"]
         for field in context_data_no_thinking:
             context_data[field] = context_data_no_thinking[field]

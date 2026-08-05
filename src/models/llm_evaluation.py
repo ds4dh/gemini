@@ -9,6 +9,8 @@ from collections import Counter
 from datasets import Dataset
 from huggingface_hub import HfApi
 from requests.exceptions import ReadTimeout
+import pandas as pd
+import datetime
 from src.utils.plot_utils import POOLED_MODES
 
 
@@ -316,3 +318,172 @@ def get_gpu_memory_usage_by_pid():
     # Convert to GB and return
     GB_used_by_pid = MiB_used_by_pid * 1024 ** 2 / 1000 ** 3
     return GB_used_by_pid
+
+
+def generate_extraction_summary_and_reports(
+    df: pd.DataFrame,
+    cfg: dict[str, Any],
+    run_dir: str,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """
+    Generates consensus summary DataFrame, saves summary_clinical_database.csv,
+    and computes metrics against ground truth (if available) or missingness/completion statistics.
+    Outputs extraction_report.json and report.md in the run_dir.
+    """
+    schema_fields = cfg.get("schema", {}).get("fields", {})
+    target_field_names = list(schema_fields.keys()) if schema_fields else ["mRS"]
+
+    patient_col = cfg.get("column_mapping", {}).get("patient_id", "patient_id")
+    if patient_col not in df.columns:
+        patient_col = "patient_id" if "patient_id" in df.columns else df.columns[0]
+
+    summary_df = pd.DataFrame()
+    summary_df[patient_col] = df[patient_col]
+
+    field_evaluations = {}
+
+    for field_name in target_field_names:
+        # Find all repeat columns matching <field_name>_000, <field_name>_001, etc.
+        repeat_cols = [c for c in df.columns if c == field_name or c.startswith(f"{field_name}_")]
+        if not repeat_cols:
+            continue
+
+        field_def = schema_fields.get(field_name, {})
+        field_type = field_def.get("type", "str").lower() if isinstance(field_def, dict) else "str"
+
+        consensus_values = []
+        for idx, row in df.iterrows():
+            row_votes = [row[c] for c in repeat_cols if pd.notna(row[c])]
+            if not row_votes:
+                consensus_values.append(None)
+            elif field_type in ("int", "integer", "float", "number"):
+                # Numeric field: try median / mode
+                num_votes = []
+                for v in row_votes:
+                    try:
+                        num_votes.append(float(v))
+                    except (ValueError, TypeError):
+                        pass
+                if num_votes:
+                    val = float(np.median(num_votes))
+                    consensus_values.append(int(val) if field_type in ("int", "integer") else round(val, 2))
+                else:
+                    consensus_values.append(None)
+            else:
+                # String / Enum field: majority vote
+                str_votes = [str(v) for v in row_votes]
+                most_common = Counter(str_votes).most_common(1)[0][0]
+                consensus_values.append(most_common)
+
+        summary_df[field_name] = consensus_values
+
+        # Check for ground truth column
+        gt_col_candidates = [
+            f"ground_truth_{field_name}",
+            f"{field_name}_gt",
+            "ground_truth",
+            "label"
+        ]
+        gt_col = next((c for c in gt_col_candidates if c in df.columns), None)
+
+        valid_predictions = [v for v in consensus_values if v is not None]
+        total_samples = len(df)
+        completed_count = len(valid_predictions)
+        completion_rate = completed_count / total_samples if total_samples > 0 else 0.0
+
+        eval_data = {
+            "field_name": field_name,
+            "field_type": field_type,
+            "total_samples": total_samples,
+            "completed_samples": completed_count,
+            "completion_rate": round(completion_rate * 100, 2),
+            "ground_truth_available": gt_col is not None,
+        }
+
+        if gt_col is not None:
+            gt_values = df[gt_col].tolist()
+            summary_df[f"ground_truth_{field_name}"] = gt_values
+
+            # Compute evaluation metrics against ground truth
+            correct_count = 0
+            evaluated_count = 0
+            abs_errors = []
+
+            for pred, gt in zip(consensus_values, gt_values):
+                if pd.isna(gt) or gt is None or str(gt).strip() in ("", "nan", "None", "-1"):
+                    continue
+                evaluated_count += 1
+                if str(pred).strip().lower() == str(gt).strip().lower():
+                    correct_count += 1
+                if field_type in ("int", "integer", "float", "number"):
+                    try:
+                        abs_errors.append(abs(float(pred) - float(gt)))
+                    except (ValueError, TypeError):
+                        pass
+
+            accuracy = (correct_count / evaluated_count * 100) if evaluated_count > 0 else 0.0
+            eval_data.update({
+                "evaluated_samples_with_gt": evaluated_count,
+                "accuracy": round(accuracy, 2),
+                "mae": round(float(np.mean(abs_errors)), 3) if abs_errors else None,
+            })
+        else:
+            eval_data.update({
+                "evaluated_samples_with_gt": 0,
+                "accuracy": None,
+                "mae": None,
+                "note": "Ground truth not provided (set to NaN)"
+            })
+
+        field_evaluations[field_name] = eval_data
+
+    # Save summary CSV
+    summary_filename = cfg.get("output", {}).get("summary_filename", "summary_clinical_database.csv")
+    summary_path = os.path.join(run_dir, summary_filename)
+    summary_df.to_csv(summary_path, index=False)
+    print(f"Saved summary database at: {summary_path}")
+
+    # Build report JSON
+    report_json = {
+        "timestamp": datetime.datetime.now().isoformat(),
+        "model_path": cfg.get("model_path"),
+        "inference_backend": cfg.get("inference_backend"),
+        "quant_scheme": cfg.get("quant_scheme"),
+        "total_records_processed": len(df),
+        "fields_evaluation": field_evaluations,
+    }
+
+    report_filename = cfg.get("output", {}).get("report_filename", "extraction_report.json")
+    report_json_path = os.path.join(run_dir, report_filename)
+    with open(report_json_path, "w") as f:
+        json.dump(report_json, f, indent=4)
+
+    # Build human-readable Markdown report
+    md_lines = [
+        f"# Clinical Variable Extraction Report",
+        f"",
+        f"- **Timestamp**: `{report_json['timestamp']}`",
+        f"- **Model**: `{report_json['model_path']}`",
+        f"- **Backend**: `{report_json['inference_backend']}`",
+        f"- **Total Records**: {report_json['total_records_processed']}",
+        f"",
+        f"## Variable Evaluation Summary",
+        f"",
+        f"| Variable | Type | Completion Rate | Evaluated (GT) | Accuracy / Match % | MAE |",
+        f"| :--- | :--- | :--- | :--- | :--- | :--- |",
+    ]
+
+    for fname, feval in field_evaluations.items():
+        acc_str = f"{feval['accuracy']}%" if feval['accuracy'] is not None else "N/A (No GT)"
+        mae_str = f"{feval['mae']}" if feval['mae'] is not None else "N/A"
+        gt_count = feval['evaluated_samples_with_gt']
+        md_lines.append(
+            f"| `{fname}` | `{feval['field_type']}` | {feval['completion_rate']}% | {gt_count} | {acc_str} | {mae_str} |"
+        )
+
+    report_md_path = os.path.join(run_dir, "report.md")
+    with open(report_md_path, "w") as f:
+        f.write("\n".join(md_lines))
+
+    print(f"Saved extraction report at: {report_json_path} and {report_md_path}")
+    return summary_df, report_json

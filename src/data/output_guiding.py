@@ -5,11 +5,21 @@ from typing import Any, Type
 from pydantic import BaseModel, ValidationError
 from pydantic_core import PydanticUndefinedType
 
-from src.data.schemas import PatientInfoSchema  #, ...
-SCHEMA_REGISTRY = {
-    "PatientInfoSchema": PatientInfoSchema,
-    # ...
-}
+from src.data.schemas import create_dynamic_pydantic_schema
+
+
+def resolve_schema_model(schema_arg: Any) -> Type[BaseModel]:
+    """
+    Resolves schema argument (schema dict from config.yaml, or Type[BaseModel]) to a Pydantic model class.
+    """
+    if isinstance(schema_arg, type) and issubclass(schema_arg, BaseModel):
+        return schema_arg
+    if isinstance(schema_arg, dict):
+        return create_dynamic_pydantic_schema(schema_arg)
+    
+    # Fallback to dynamic schema creation
+    return create_dynamic_pydantic_schema({})
+
 
 
 def extract_structured_output(
