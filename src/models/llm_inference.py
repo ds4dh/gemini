@@ -22,6 +22,7 @@ except ImportError:
     OpenAI, AsyncOpenAI, InternalServerError = None, None, Exception
 
 from src.data.output_guiding import extract_structured_output, resolve_schema_model
+from src.data.prompting import build_prompt
 
 
 def _infer_vllm(

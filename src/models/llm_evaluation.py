@@ -20,7 +20,7 @@ def pool_model_predictions(
     preds_and_labels: list[Dataset],
     pred_pool_mode: str,
     num_models: int | None = None,
-) -> tuple[np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Pool model predictions on the same set of samples given a pooling method
     """
@@ -116,7 +116,7 @@ def _record_metrics(
 def _record_metrics_for_pooling_modes(
     preds_and_labels: list[Dataset],
     pooling_modes: list[dict],
-) -> tuple[dict, dict]:
+) -> tuple[dict, dict, dict]:
     """
     Computes metrics for different pooling modes, dynamically handling any number of models.
     """
