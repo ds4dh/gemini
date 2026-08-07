@@ -458,6 +458,38 @@ SYNTHETIC_DATA = [
         "ground_truth_patient_age": 35,
         "ground_truth_lesion_location": "None",
     },
+    {
+        "patient_id": "PAT_029",
+        "input_text": (
+            "LETTRE DE SUIVI EN CONSULTATION EXTERNE\n"
+            "Patient de 69 ans vu pour contrôle annuel de son hypertension artérielle. TA mesurée à 132/80 mmHg sous Lercanidipine.\n"
+            "Statut toxique: Ancien fumeur, sevrage tabagique complet depuis 8 ans.\n"
+            "Examen neurologique: Absence de symptôme neurologique résiduel. Le patient marche seul et réalise l'ensemble des tâches quotidiennes en toute autonomie.\n"
+            "Examen complémentaire: Bilan biologique sanguin et ECG normaux. Aucune imagerie cérébrale ni angioscanner vasculaire n'a été réalisé lors de cette consultation de routine."
+        ),
+        "ground_truth_mRS": 0,
+        "ground_truth_smoking_status": "Former-smoker",
+        "ground_truth_aneurysm_size_mm": None,
+        "ground_truth_hypertension": "Yes",
+        "ground_truth_patient_age": 69,
+        "ground_truth_lesion_location": "None",
+    },
+    {
+        "patient_id": "PAT_030",
+        "input_text": (
+            "RAPPORT DE CONSULTATION DE SUIVI CLINIQUE\n"
+            "Patiente de 54 ans consultée pour suivi de tension artérielle. HTA traitée par Irbésartan 150mg.\n"
+            "Habitudes: N'a jamais fumé de sa vie (non-fumeuse).\n"
+            "Évaluation fonctionnelle: La patiente décrit une fatigabilité précoce au travail mais reste autonome pour la toilette, la cuisine et les déplacements au quotidien.\n"
+            "Aucun bilan d'imagerie cérébrale ni mesure anévrismale n'a été effectué au cours de cette visite."
+        ),
+        "ground_truth_mRS": 1,
+        "ground_truth_smoking_status": "Non-smoker",
+        "ground_truth_aneurysm_size_mm": None,
+        "ground_truth_hypertension": "Yes",
+        "ground_truth_patient_age": 54,
+        "ground_truth_lesion_location": "None",
+    },
 ]
 
 

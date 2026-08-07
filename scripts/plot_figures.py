@@ -67,16 +67,27 @@ def generate_pooled_metric_plots(
     if not os.path.exists(output_dir): os.makedirs(output_dir)
     num_cols = 2
     num_rows = math.ceil(len(CASES) / num_cols)
-    fig, axes = plt.subplots(num_rows, num_cols, figsize=(10, 4 * num_rows), squeeze=False)
+    fig, axes = plt.subplots(num_rows, num_cols, figsize=(11, 4.5 * num_rows), squeeze=False)
+    fig.patch.set_facecolor("#F8FAFC")
     axes_flat = axes.flatten()
     csv_data = []
+
+    MODERN_PALETTE = [
+        "#2563EB", "#D97706", "#059669", "#DC2626", "#7C3AED",
+        "#DB2777", "#4F46E5", "#0284C7", "#65A30D", "#475569"
+    ]
     
     for i, case_name in enumerate(CASES):
+        axes_flat[i].set_facecolor("#FFFFFF")
+        for spine in axes_flat[i].spines.values():
+            spine.set_color("#CBD5E1")
+            spine.set_linewidth(1.0)
+
         raw_key = CASE_MAPPING.get(case_name, "single")  # get internal key
         
         for group_idx, (group_label, result_paths_in_group) in enumerate(result_path_group.items()):
             group_data_points = []
-            group_color = GROUP_COLORS[group_idx % len(GROUP_COLORS)]
+            group_color = MODERN_PALETTE[group_idx % len(MODERN_PALETTE)]
             for result_path in result_paths_in_group:
 
                 # Load data
@@ -135,23 +146,23 @@ def generate_pooled_metric_plots(
             x_values = [dp[MAIN_X_VARIABLE] for dp in group_data_points]
             plotted_y_id_cased = f"{target_variable} - {case_name}"
             y_values = [dp[plotted_y_id_cased] for dp in group_data_points]
-            sizes = [200 * dp["nbits"] / 16 for dp in group_data_points]
+            sizes = [180 * dp["nbits"] / 16 for dp in group_data_points]
 
             # Plot the scatter points
             axes_flat[i].scatter(
                 x_values, y_values, color=group_color, label=group_label,
-                marker="o", alpha=0.9, s=sizes, edgecolors='white', linewidth=0.5, zorder=1,
+                marker="o", alpha=0.88, s=sizes, edgecolors='#0F172A', linewidth=0.6, zorder=3,
             )
 
             # Plot the error bars
             rgb = mcolors.to_rgb(group_color)
-            darker_color = tuple(c * 0.5 for c in rgb)
+            darker_color = tuple(c * 0.4 for c in rgb)
             y_err_low = [dp[f"{plotted_y_id_cased}_err_low"] for dp in group_data_points]
             y_err_high = [dp[f"{plotted_y_id_cased}_err_high"] for dp in group_data_points]
             axes_flat[i].errorbar(
                 x_values, y_values, yerr=[y_err_low, y_err_high],
-                elinewidth=0.75, markeredgewidth=0.75, fmt='none',
-                ecolor=darker_color, alpha=0.7, capsize=3, zorder=2,
+                elinewidth=0.9, markeredgewidth=0.9, fmt='none',
+                ecolor=darker_color, alpha=0.65, capsize=3.5, zorder=2,
             )
 
             # Record data for pooled json/csv
@@ -171,22 +182,22 @@ def generate_pooled_metric_plots(
             if tick_dist is not None:
                 axes_flat[i].yaxis.set_major_locator(ticker.MultipleLocator(tick_dist))
                 axes_flat[i].yaxis.set_minor_locator(ticker.AutoMinorLocator(2))
-        axes_flat[i].set_xlabel(x_label, fontsize=12)
-        axes_flat[i].set_ylabel(y_label, fontsize=12)
+        axes_flat[i].set_xlabel(x_label, fontsize=10.5, fontweight="600", color="#0F172A", labelpad=8)
+        axes_flat[i].set_ylabel(y_label, fontsize=10.5, fontweight="600", color="#0F172A", labelpad=8)
         if X_CONFIGS[MAIN_X_VARIABLE]["lim"] is not None:
             axes_flat[i].set_xlim(X_CONFIGS[MAIN_X_VARIABLE]["lim"])
         if Y_CONFIGS[target_variable]["lim"] is not None:
             axes_flat[i].set_ylim(Y_CONFIGS[target_variable]["lim"])
-        axes_flat[i].tick_params(axis="y", labelsize=10)
-        axes_flat[i].tick_params(axis="x", labelsize=10)
-        axes_flat[i].grid(True, linestyle="--", alpha=0.6)
-        axes_flat[i].set_title(f"Prediction with {case_name}", fontsize=14, pad=10)
-        axes_flat[i].legend(loc="upper right", fontsize=10, fancybox=True, ncol=2)
+        axes_flat[i].tick_params(axis="y", labelsize=9.5, colors="#334155")
+        axes_flat[i].tick_params(axis="x", labelsize=9.5, colors="#334155")
+        axes_flat[i].grid(True, linestyle="--", alpha=0.4, color="#94A3B8")
+        axes_flat[i].set_title(f"Prediction with {case_name}", fontsize=12, fontweight="700", color="#0F172A", pad=12)
+        axes_flat[i].legend(loc="upper right", fontsize=9, framealpha=0.95, facecolor="#F8FAFC", edgecolor="#E2E8F0", ncol=2)
 
     # Save the pooled results figure
     fig.tight_layout(rect=[0, 0.03, 1, 0.95])
     plot_full_path = os.path.join(output_dir, f"{output_name}_{target_variable}.png")
-    plt.savefig(plot_full_path, bbox_inches="tight", dpi=600)
+    plt.savefig(plot_full_path, bbox_inches="tight", dpi=300, facecolor=fig.get_facecolor(), edgecolor="none")
     plt.close(fig)
     print(f"Combined plot saved: {plot_full_path}")
 

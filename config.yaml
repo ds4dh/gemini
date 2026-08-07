@@ -48,13 +48,29 @@ prompt:
 
   context_data:
     task_description: |
-      Tu es un expert médical et neuro-chirurgien. Ta tâche est d’extraire les variables cliniques du patient 
-      (mRS score, statut tabagique, taille d'anévrisme en mm) d'après le texte médical fourni.
+      Tu es un expert médical et neuro-chirurgien. Ta tâche est d’analyser le texte médical clinique et d'en déduire les variables cliniques (mRS score, statut tabagique, taille d'anévrisme en mm).
     domain_knowledge: |
-      Règles cliniques pour l'extraction:
-      - mRS (Échelle de Rankin Modifiée): 0 (aucun symptôme), 1 (incapacité non significative), 2 (incapacité légère, autonome), 3 (incapacité modérée, marche seul), 4 (incapacité modérément sévère, besoin d'aide pour marcher/soins), 5 (alité/incontinent), 6 (décédé). -1 si non mentionné.
-      - smoking_status: "Smoker" (fumeur actif), "Non-smoker" (jamais fumé), "Former-smoker" (ancien fumeur/sevré), "Unknown" (inconnu/non mentionné).
-      - aneurysm_size_mm: Diamètre maximal de l'anévrisme intracrânien en mm (ex: 4.5), ou null si aucun anévrisme décelé.
+      Règles d'évaluation et de déduction clinique :
+
+      1. mRS (Échelle de Rankin Modifiée) - Déduis le score d'après la description fonctionnelle ou l'issue du patient, même si le sigle "mRS" n'est pas écrit explicitement :
+         - 6 (Décédé) : Tout décès du patient, arrêt cardiorespiratoire irréversible, évolution fatale ou constat de décès.
+         - 5 (Incapacité sévère) : Patient alité en permanence, tétraparétique, incontinent/sondé ou dépendant 24h/24 des soignants.
+         - 4 (Incapacité modérément sévère) : Incapable de marcher sans aide physique d'un tiers, besoin d'aide pour l'habillage/toilette.
+         - 3 (Incapacité modérée) : Marche seul sans aide physique, mais a besoin d'aide pour les courses, ménage lourd ou démarches.
+         - 2 (Incapacité légère) : Autonomie complète pour tous les actes quotidiens (toilette, repas, logement), mais incapable de reprendre toutes ses activités antérieures (travail, sport intense).
+         - 1 (Incapacité non significative) : Autonome, symptômes mineurs n'entraînant aucune restriction des activités usuelles.
+         - 0 (Aucun symptôme) : Récupération ad integrum, aucun symptôme ni gêne.
+         - -1 (Inconnu) : Uniquement si l'état fonctionnel ou neurologique n'est aucunement mentionné dans le texte.
+
+      2. Statut tabagique (smoking_status) :
+         - "Smoker" : Fumeur actif (cigarettes, cigares, paquets-années, tabac à rouler).
+         - "Former-smoker" : Ancien fumeur ayant définitivement arrêté (sevrage tabagique réussi).
+         - "Non-smoker" : Jamais fumé, absence de facteur de risque tabagique.
+         - "Unknown" : Information absente ou non renseignée.
+
+      3. Taille d'anévrisme en millimètres (aneurysm_size_mm) :
+         - Diamètre maximal de l'anévrisme intracrânien converti en millimètres (mm). Si la taille est exprimée en cm (ex: 1.2 cm, 0.45 cm), convertis-la obligatoirement en mm (ex: 12.0, 4.5).
+         - Retourne null si aucun anévrisme n'est décelé ou si l'imagerie est normale.
     output_specifications: |
       Si tu inclus un raisonnement, mets-le uniquement entre les balises <think> et </think> et limite-le à 5 phrases maximum.
       La réponse finale doit être un objet JSON strict sans texte additionnel, avec le format suivant:
@@ -81,6 +97,7 @@ data:
 model:
   # Model path or HuggingFace ID
   # model_path: "Qwen/Qwen2.5-0.5B-Instruct"
+  # model_path: "Qwen/Qwen3.5-0.8B"
   model_path: "cyankiwi/Qwen3.5-4B-AWQ-4bit"
 
   # Inference backend options:
