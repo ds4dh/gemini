@@ -3,6 +3,7 @@ import os
 import re
 import shutil
 import socket
+import sys
 
 import psutil
 import yaml
@@ -202,7 +203,7 @@ def normalize_pipeline_config(raw_cfg: dict) -> dict:
     cfg.setdefault("result_dir", "./results")
     cfg.setdefault("resume_previous_run", True)
     cfg.setdefault("save_chunk_size", 100)
-    cfg.setdefault("inference_backend", "transformers")
+    cfg.setdefault("inference_backend", "vllm")
     cfg.setdefault("model_path", "Qwen/Qwen2.5-0.5B-Instruct")
     cfg.setdefault("quant_scheme", None)
     cfg.setdefault("n_inference_repeats", 1)
@@ -291,16 +292,76 @@ def set_distributed_environment():
     """
     Automatically detects the primary network interface and sets environment
     variables for torch.distributed (Gloo/NCCL) to prevent socket binding errors
-    on systems with multiple network interfaces.
+    on systems with multiple network interfaces. Also sets CUDA_LIB_PATH on Windows.
     """
-    # Connects to a public DNS server to find the OS's preferred outbound IP
+    # On Windows, set CUDA_LIB_PATH and register DLL search directories for vLLM and flashinfer
+    if sys.platform == "win32":
+        import site, shutil
+        for sp in site.getsitepackages():
+            nv_path = os.path.join(sp, "nvidia")
+            if os.path.exists(nv_path):
+                for sub in os.listdir(nv_path):
+                    if sub.startswith("cu"):
+                        candidate = os.path.join(nv_path, sub)
+                        cu_bin = os.path.join(candidate, "bin")
+                        cu_x86 = os.path.join(cu_bin, "x86_64")
+                        cu_lib = os.path.join(candidate, "lib")
+                        torch_lib = os.path.join(sp, "torch", "lib")
+
+                        # Ensure bin directory exists and contains cudart64_*.dll for flashinfer
+                        os.makedirs(cu_bin, exist_ok=True)
+                        for d in [cu_x86, torch_lib]:
+                            if os.path.exists(d):
+                                for f in os.listdir(d):
+                                    if f.startswith("cudart64_") and f.endswith(".dll"):
+                                        target_f = os.path.join(cu_bin, f)
+                                        if not os.path.exists(target_f):
+                                            try:
+                                                shutil.copy2(os.path.join(d, f), target_f)
+                                                print(f"Copied CUDA runtime DLL to: '{target_f}'")
+                                            except Exception:
+                                                pass
+
+                        # Register Windows DLL directories
+                        for dll_dir in [cu_bin, cu_x86, cu_lib, torch_lib]:
+                            if os.path.exists(dll_dir):
+                                try:
+                                    os.add_dll_directory(dll_dir)
+                                except Exception:
+                                    pass
+                                os.environ["PATH"] = dll_dir + ";" + os.environ.get("PATH", "")
+
+                        # Add virtual environment Scripts directory to PATH for ninja execution
+                        scripts_dir = os.path.dirname(sys.executable)
+                        if scripts_dir and os.path.exists(scripts_dir):
+                            os.environ["PATH"] = scripts_dir + ";" + os.environ.get("PATH", "")
+
+                        os.environ["CUDA_PATH"] = candidate
+                        os.environ["CUDA_LIB_PATH"] = cu_lib
+                        os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
+                        print(f"Automatically set CUDA_PATH to: '{candidate}' and CUDA_LIB_PATH to: '{cu_lib}'")
+                        break
+
+        # On Windows, set MASTER_ADDR to loopback and unset socket ifnames so Gloo uses standard Windows loopback
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ.pop("GLOO_SOCKET_IFNAME", None)
+        os.environ.pop("NCCL_SOCKET_IFNAME", None)
+
+        # Assign random non-ephemeral ports to avoid socket TIME_WAIT state and default port 29550 collisions
+        import random
+        base_port = random.randint(30000, 44000)
+        os.environ["VLLM_DP_MASTER_PORT"] = str(base_port)
+        os.environ["MASTER_PORT"] = str(base_port)
+        os.environ["VLLM_PORT"] = str(base_port + 20)
+        return
+
+    # Linux multi-interface detection
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("8.8.8.8", 80))
             primary_ip = s.getsockname()[0]
     except Exception as e:
         print(f"Could not automatically determine the primary IP address: {e}")
-        print("You may need to set GLOO_SOCKET_IFNAME and NCCL_SOCKET_IFNAME manually.")
         return
 
     # Find the interface name that corresponds to this IP address
@@ -320,6 +381,3 @@ def set_distributed_environment():
         os.environ['GLOO_SOCKET_IFNAME'] = interface_name
         os.environ['NCCL_SOCKET_IFNAME'] = interface_name
         print(f"Successfully set GLOO_SOCKET_IFNAME and NCCL_SOCKET_IFNAME to '{interface_name}'")
-    else:
-        print("Failed to find a network interface matching the primary IP.")
-        print("You may need to set GLOO_SOCKET_IFNAME and NCCL_SOCKET_IFNAME manually.")

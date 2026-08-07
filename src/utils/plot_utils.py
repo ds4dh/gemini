@@ -1,3 +1,4 @@
+import os
 import json
 import numpy as np
 import torch
@@ -149,3 +150,222 @@ def plot_cm(
             xy=(6.5, 6.5), width=1, height=1, linewidth=2, zorder=10,
             edgecolor='tab:red', facecolor='none',
         ))
+
+
+def _normalize_cat(val):
+    if val is None or (isinstance(val, float) and np.isnan(val)):
+        return "Unknown"
+    s = str(val).strip()
+    if s.lower() in ("", "nan", "none", "null", "-1"):
+        return "Unknown"
+    return s
+
+
+def _try_float(val):
+    if val is None or (isinstance(val, float) and np.isnan(val)):
+        return None
+    s = str(val).strip()
+    if s.lower() in ("", "nan", "none", "null", "-1"):
+        return None
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        return None
+
+
+def is_field_continuous(field_name: str, field_type: str, y_true: list) -> bool:
+    return field_type in ("float", "double", "number") or (
+        field_type in ("int", "integer") and field_name != "mRS" and any(_try_float(v) is not None and _try_float(v) > 10 for v in y_true)
+    )
+
+
+def plot_categorical_cm(ax: plt.Axes, field_name: str, y_true: list, y_pred: list):
+    norm_gt = [_normalize_cat(g) for g in y_true]
+    norm_pred = [_normalize_cat(p) for p in y_pred]
+
+    labels = list(dict.fromkeys(norm_gt + norm_pred))
+    def label_sort_key(x):
+        try:
+            return (0, float(x))
+        except ValueError:
+            return (2 if x.lower() in ("unknown", "missing", "none") else 1, x)
+
+    labels = sorted(labels, key=label_sort_key)
+    str_labels = [str(lbl) for lbl in labels]
+
+    cm = confusion_matrix(norm_gt, norm_pred, labels=labels)
+
+    ax.set_facecolor("#FFFFFF")
+    im = ax.imshow(cm, cmap="YlGnBu", interpolation="none")
+
+    ax.set_xticks(range(len(labels)))
+    ax.set_yticks(range(len(labels)))
+    ax.set_xticklabels(str_labels, rotation=30 if len(str_labels) > 3 else 0, ha="right" if len(str_labels) > 3 else "center", fontsize=8.5, color="#1E293B")
+    ax.set_yticklabels(str_labels, fontsize=8.5, color="#1E293B")
+    ax.set_xlabel("Predicted", fontsize=9.5, fontweight="bold", color="#0F172A", labelpad=6)
+    ax.set_ylabel("Ground Truth", fontsize=9.5, fontweight="bold", color="#0F172A", labelpad=6)
+    ax.set_title(f"Confusion Matrix: {field_name}", fontsize=11, fontweight="bold", color="#0F172A", pad=10)
+
+    # Grid lines between cells for card/tile look
+    ax.set_xticks(np.arange(-0.5, len(labels), 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, len(labels), 1), minor=True)
+    ax.grid(which="minor", color="#F1F5F9", linestyle="-", linewidth=1.5)
+    ax.tick_params(which="minor", bottom=False, left=False)
+
+    max_val = np.max(cm) if cm.size > 0 else 1
+    for i in range(len(labels)):
+        for j in range(len(labels)):
+            val = cm[i, j]
+            if val > 0:
+                color = "white" if val > max_val * 0.55 else "#0F172A"
+                ax.text(j, i, str(val), ha="center", va="center", color=color, fontweight="bold", fontsize=9.5)
+
+
+def plot_continuous_scatter_with_presence_inset(
+    ax: plt.Axes,
+    field_name: str,
+    y_true: list,
+    y_pred: list,
+):
+    clean_gt = []
+    clean_pred = []
+    tp, fn, fp, tn = 0, 0, 0, 0
+
+    for g, p in zip(y_true, y_pred):
+        g_f = _try_float(g)
+        p_f = _try_float(p)
+
+        if g_f is not None and p_f is not None:
+            clean_gt.append(g_f)
+            clean_pred.append(p_f)
+            tp += 1
+        elif g_f is not None and p_f is None:
+            fn += 1
+        elif g_f is None and p_f is not None:
+            fp += 1
+        elif g_f is None and p_f is None:
+            tn += 1
+
+    c_gt = np.array(clean_gt)
+    c_pred = np.array(clean_pred)
+    ax.set_facecolor("#FFFFFF")
+
+    if len(c_gt) > 0:
+        ax.scatter(c_gt, c_pred, color="#2563EB", alpha=0.88, edgecolors="#1E3A8A", s=55, label="Predictions", zorder=3)
+
+        min_val = min(c_gt.min(), c_pred.min())
+        max_val = max(c_gt.max(), c_pred.max())
+        if min_val == max_val:
+            min_val -= 1.0
+            max_val += 1.0
+        ax.plot([min_val, max_val], [min_val, max_val], color="#EF4444", linestyle="--", linewidth=2, alpha=0.85, label="Perfect (y=x)", zorder=2)
+
+        mae = float(np.mean(np.abs(c_gt - c_pred)))
+        r_str = ""
+        if len(c_gt) > 1 and np.std(c_gt) > 0 and np.std(c_pred) > 0:
+            r_val = float(np.corrcoef(c_gt, c_pred)[0, 1])
+            r_str = f" | r = {r_val:.3f}"
+
+        annot = f"N = {len(c_gt)} | MAE = {mae:.2f}{r_str}"
+        ax.set_xlabel("Ground Truth", fontsize=9.5, fontweight="bold", color="#0F172A", labelpad=6)
+        ax.set_ylabel("Predicted", fontsize=9.5, fontweight="bold", color="#0F172A", labelpad=6)
+        ax.set_title(f"Correlation: {field_name}\n({annot})", fontsize=10.5, fontweight="bold", color="#0F172A", pad=8)
+        ax.legend(loc="lower right", fontsize=8.5, framealpha=0.9, facecolor="#F8FAFC", edgecolor="#E2E8F0")
+        ax.grid(True, linestyle="--", alpha=0.5, color="#CBD5E1")
+    else:
+        ax.text(
+            0.5, 0.5, "No paired numeric values", transform=ax.transAxes, ha="center", va="center",
+            fontsize=9.5, color="#64748B", bbox=dict(boxstyle="round,pad=0.4", facecolor="#F1F5F9", edgecolor="#CBD5E1")
+        )
+        ax.set_title(f"Correlation: {field_name}", fontsize=10.5, fontweight="bold", color="#0F172A", pad=8)
+
+    # Mini 2x2 Presence CM Heatmap Card Inset inside top-left corner
+    ax_inset = ax.inset_axes([0.05, 0.48, 0.40, 0.40])
+    ax_inset.set_facecolor("#FFFFFF")
+    presence_cm = np.array([[tp, fn], [fp, tn]])
+
+    im = ax_inset.imshow(presence_cm, cmap="Purples", interpolation="none")
+
+    ax_inset.set_xticks([0, 1])
+    ax_inset.set_yticks([0, 1])
+    ax_inset.set_xticklabels(["Pres", "Abs"], fontsize=7, color="#1E293B")
+    ax_inset.set_yticklabels(["Pres", "Abs"], fontsize=7, color="#1E293B")
+    ax_inset.set_xlabel("Pred", fontsize=7.5, labelpad=2, fontweight="bold", color="#0F172A")
+    ax_inset.set_ylabel("GT", fontsize=7.5, labelpad=2, fontweight="bold", color="#0F172A")
+    ax_inset.set_title("Presence CM", fontsize=8, pad=3, fontweight="bold", color="#0F172A")
+
+    # Inset cell grid lines
+    ax_inset.set_xticks([-0.5, 0.5, 1.5], minor=True)
+    ax_inset.set_yticks([-0.5, 0.5, 1.5], minor=True)
+    ax_inset.grid(which="minor", color="#FFFFFF", linestyle="-", linewidth=1.2)
+    ax_inset.tick_params(which="minor", bottom=False, left=False)
+
+    cell_tags = [["TP", "FN"], ["FP", "TN"]]
+    max_v = np.max(presence_cm) if presence_cm.size > 0 else 1
+
+    for i in range(2):
+        for j in range(2):
+            cnt = presence_cm[i, j]
+            tag = cell_tags[i][j]
+            color = "white" if cnt > max_v * 0.55 else "#0F172A"
+            ax_inset.text(j, i, f"{tag}:{cnt}", ha="center", va="center", color=color, fontweight="bold", fontsize=7.5)
+
+
+def generate_combined_evaluation_dashboard(
+    fields_eval_data: dict[str, dict],
+    output_path: str,
+) -> str | None:
+    """
+    Generates a single consolidated evaluation dashboard figure (evaluation_dashboard.png)
+    containing subplots for all extracted variables (1 subplot per variable).
+    """
+    if not fields_eval_data:
+        return None
+
+    import math
+    all_fields = list(fields_eval_data.items())
+    num_fields = len(all_fields)
+    if num_fields == 0:
+        return None
+
+    # Dynamic balanced layout sizing
+    if num_fields <= 3:
+        ncols = num_fields
+        nrows = 1
+    elif num_fields == 4:
+        ncols = 2
+        nrows = 2
+    else:
+        ncols = 3
+        nrows = math.ceil(num_fields / 3)
+
+    fig_width = 4.8 * ncols
+    fig_height = 4.4 * nrows
+    fig, axes = plt.subplots(nrows, ncols, figsize=(fig_width, fig_height))
+    fig.patch.set_facecolor("#F8FAFC")
+
+    if num_fields == 1:
+        axes_flat = [axes]
+    elif hasattr(axes, "flatten"):
+        axes_flat = list(axes.flatten())
+    else:
+        axes_flat = list(axes)
+
+    for idx, (fname, fdata) in enumerate(all_fields):
+        ax = axes_flat[idx]
+        if is_field_continuous(fname, fdata["field_type"], fdata["y_true"]):
+            plot_continuous_scatter_with_presence_inset(ax, fname, fdata["y_true"], fdata["y_pred"])
+        else:
+            plot_categorical_cm(ax, fname, fdata["y_true"], fdata["y_pred"])
+
+    # Hide unused extra subplots if total features is not a multiple of ncols
+    for unused_idx in range(num_fields, len(axes_flat)):
+        axes_flat[unused_idx].set_visible(False)
+
+    fig.suptitle("Clinical Variable Extraction - Evaluation Dashboard", fontsize=15, fontweight="bold", color="#0F172A", y=0.98)
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    plt.savefig(output_path, dpi=200, bbox_inches="tight", facecolor=fig.get_facecolor(), edgecolor="none")
+    plt.close(fig)
+    return output_path
+

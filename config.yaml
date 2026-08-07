@@ -80,17 +80,17 @@ data:
 # ------------------------------------------------------------------------------
 model:
   # Model path or HuggingFace ID
-  model_path: "Qwen/Qwen2.5-0.5B-Instruct"
+  # model_path: "Qwen/Qwen2.5-0.5B-Instruct"
+  model_path: "cyankiwi/Qwen3.5-4B-AWQ-4bit"
 
   # Inference backend options:
-  # - "transformers" (HuggingFace Transformers PyTorch - great for local desktop testing)
-  # - "mock" (Instant dummy offline testing)
-  # - "vllm" (vLLM direct GPU - for Linux/HPC)
-  # - "vllm-serve-async" (vLLM OpenAI server - for high-throughput Linux/HPC)
+  # - "vllm" (vLLM direct GPU)
+  # - "vllm-serve-async" (vLLM OpenAI server - for high-throughput)
   # - "llama-cpp" (GGUF llama.cpp)
-  inference_backend: "transformers"
+  # - "mock" (Instant dummy offline testing)
+  inference_backend: "vllm"
 
-  quant_scheme: null
+  quant_scheme: null  # only used if "gguf" in model_path.lower()
   enable_thinking: false
   max_thinking_tokens: 512
   n_inference_repeats: 1

@@ -5,6 +5,8 @@ from typing import Any, Type
 import json5
 from pydantic import BaseModel, ValidationError
 
+from pydantic_core import PydanticUndefined
+
 from src.data.schemas import create_dynamic_pydantic_schema
 
 
@@ -19,7 +21,6 @@ def resolve_schema_model(schema_arg: Any) -> Type[BaseModel]:
     
     # Fallback to dynamic schema creation
     return create_dynamic_pydantic_schema({})
-
 
 
 def extract_structured_output(
@@ -39,7 +40,7 @@ def extract_structured_output(
     # Direct Pydantic parse
     try:
         validated_output = output_schema_model.model_validate_json(raw_output.strip())
-        print("Success: Direct parsing successful.")
+        # print("Success: Direct parsing successful.")
         return validated_output.model_dump()
     except (ValidationError, json.JSONDecodeError):
         pass
@@ -204,10 +205,9 @@ def _get_default_values(model: Type[BaseModel]) -> dict[str, Any]:
     for name, field in model.model_fields.items():
         if field.default_factory:
             defaults[name] = field.default_factory()
-        elif not isinstance(field.default, PydanticUndefinedType):
+        elif field.default is not PydanticUndefined:
             defaults[name] = field.default
         else:
-            # For required fields, use a sensible empty default based on type
             field_type = field.annotation
             if hasattr(field_type, "__origin__") and field_type.__origin__ == list:
                 defaults[name] = []

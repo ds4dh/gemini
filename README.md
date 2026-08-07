@@ -9,8 +9,8 @@
 - **Single-File Configuration (`config.yaml`)**: Manage target extraction variables, prompt templates, model selection, inference backends, and output paths from a single configuration file.
 - **Dynamic Schema Engine**: Automatically generates Pydantic validation schemas at runtime based on field specifications (e.g., Modified Rankin Scale score `mRS`, `smoking_status`, `aneurysm_size_mm`, or custom clinical parameters).
 - **Multi-Backend Inference**:
-  - `transformers`: Local PyTorch inference using HuggingFace models.
   - `vllm` / `vllm-serve-async`: High-throughput GPU inference engine for desktop and HPC environments.
+  - `llama-cpp`: GGUF format model execution via llama.cpp.
   - `mock`: Instant offline execution mode for verifying pipeline logic and prompt structure.
 - **Cross-Platform Compatibility**: Fully supported on Windows desktop environments and Linux HPC clusters with Apptainer/Singularity container support.
 
@@ -48,7 +48,7 @@ uv pip install -e .
 ```
 
 *Note for Windows vLLM installation*:
-Standard local execution on Windows uses the `transformers` or `mock` backends. To run `vllm` natively on Windows, download the matching `.whl` binary wheel from [SystemPanic/vllm-windows Releases](https://github.com/SystemPanic/vllm-windows/releases) and install it using:
+To run `vllm` natively on Windows, download the matching `.whl` binary wheel from [SystemPanic/vllm-windows Releases](https://github.com/SystemPanic/vllm-windows/releases) and install it using:
 ```powershell
 uv pip install path/to/downloaded/vllm-0.26.0+cu132-cp312-cp312-win_amd64.whl --extra-index-url https://download.pytorch.org/whl/cu130
 ```
@@ -75,11 +75,6 @@ Run the pipeline using `config.yaml`:
 #### Offline Test Run (Mock Backend)
 ```bash
 python run_pipeline.py --config config.yaml --backend mock
-```
-
-#### Local Desktop Inference (HuggingFace Transformers Backend)
-```bash
-python run_pipeline.py --config config.yaml --backend transformers --model Qwen/Qwen2.5-0.5B-Instruct
 ```
 
 #### High-Throughput GPU Inference (vLLM Backend)

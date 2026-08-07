@@ -3,7 +3,7 @@
 # Configuration & Paths
 CONFIG_FILE="./config.yaml"
 CURATED_DATA_PATH="data/synthetic_clinical_notes.csv"  # or /data/final/20260302_Letters_Combined.csv
-INFERENCE_BACKEND="transformers"                      # or vllm-serve-async / vllm
+INFERENCE_BACKEND="vllm"                              # or vllm-serve-async / llama-cpp
 GPU_MEM_UTIL="0.80"
 
 # Check baseline config file

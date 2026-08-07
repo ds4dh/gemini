@@ -54,7 +54,7 @@ def main():
         "--backend", "-b",
         type=str,
         default=None,
-        help="Override inference backend (transformers, mock, vllm, vllm-serve-async, llama-cpp)"
+        help="Override inference backend (vllm, vllm-serve-async, llama-cpp, mock)"
     )
     parser.add_argument(
         "--model", "-m",

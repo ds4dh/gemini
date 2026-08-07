@@ -9,8 +9,9 @@ from warnings import warn
 import httpx
 import psutil
 import torch
+from typing import Any
 from huggingface_hub import HfApi, hf_hub_download, list_repo_files, snapshot_download
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 
 try:
     from vllm import LLM
@@ -18,11 +19,33 @@ except ImportError:
     LLM = None
 
 try:
+    from llama_cpp import Llama
+except ImportError:
+    Llama = None
+
+try:
     from openai import AsyncOpenAI, OpenAI
 except ImportError:
     OpenAI, AsyncOpenAI = None, None
 
 from src.utils.run_utils import extract_quant_method
+
+
+def _detect_hf_config_quant_method(model_path: str) -> str | None:
+    """
+    Extracts quantization method directly from HF model config.json if available.
+    """
+    try:
+        from transformers import AutoConfig
+        config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        q_cfg = getattr(config, "quantization_config", None)
+        if isinstance(q_cfg, dict):
+            return q_cfg.get("quant_method")
+        elif hasattr(q_cfg, "quant_method"):
+            return getattr(q_cfg, "quant_method")
+    except Exception:
+        pass
+    return None
 
 
 def _load_model_vllm(
@@ -37,28 +60,63 @@ def _load_model_vllm(
     """
     Load a model using the vLLM backend
     """
+    if LLM is None:
+        raise ImportError(
+            "vLLM package is not installed in this Python environment.\n"
+            "Note: Standard vLLM cannot be installed via default `pip install` on native Windows.\n\n"
+            "Options on Windows:\n"
+            "  1. Switch to `inference_backend: llama-cpp` in config.yaml for GGUF models.\n"
+            "  2. Install a prebuilt Windows vLLM wheel (see README.md).\n"
+            "  3. Run inside WSL2 (Windows Subsystem for Linux) or on a Linux GPU server."
+        )
+
+    if "VLLM_DP_MASTER_PORT" not in os.environ:
+        from src.utils.run_utils import set_distributed_environment
+        set_distributed_environment()
+
     # Initialize vLLM model arguments
     model_args = {
         "trust_remote_code": True,
         "max_model_len": max_context_length,
         "tensor_parallel_size": num_gpus_to_use,
         "gpu_memory_utilization": gpu_memory_utilization,
+        "enforce_eager": True if sys.platform == "win32" else False,
     }
 
-    # Check for arguments specific to the quantization method
-    if quant_method == "bnb":
+    # Check if quantization method is already defined in model's config.json
+    config_quant = _detect_hf_config_quant_method(model_path)
+
+    model_args.update({"model": model_path})
+
+    if config_quant:
+        print(f"Detected quantization method '{config_quant}' in model config.json. Letting vLLM auto-detect.")
+        model_args["quantization"] = None
+    elif quant_method == "bnb":
         raise ValueError(f"vLLM does not support format {quant_method}")
     elif quant_method == "gguf":
-        model_file_path = download_gguf_by_quant(model_path, quant_scheme)
-        # tokenizer_path = get_tokenizer_name(model_path)
-        # model_args.update({"model": model_file_path, "tokenizer": tokenizer_path})
-        model_args.update({"model": model_file_path})
+        raise ValueError(
+            "vLLM does not support GGUF quantization format.\n"
+            "Supported vLLM quantizations are: ['awq', 'gptq', 'fp8', 'bitsandbytes', 'torchao', etc.].\n\n"
+            "To use GGUF models, please change config.yaml to:\n"
+            "  inference_backend: \"llama-cpp\"\n"
+            "And install llama-cpp-python with: `uv pip install llama-cpp-python`"
+        )
     else:
-        model_args.update({"model": model_path, "quantization": quant_method})
+        model_args["quantization"] = quant_method
         if quant_method == "awq":
             model_args.update({"dtype": "float16", "quantization": "awq_marlin"})
 
-    return LLM(**model_args)
+    try:
+        return LLM(**model_args)
+    except Exception as e:
+        err_msg = str(e)
+        if "Quantization method specified" in err_msg or "ValidationError" in err_msg or "quantization" in err_msg.lower():
+            print(f"Notice: Explicit quantization setting failed ({e}). Retrying with vLLM auto-detection (quantization=None)...")
+            model_args["quantization"] = None
+            if "dtype" in model_args:
+                del model_args["dtype"]
+            return LLM(**model_args)
+        raise e
 
 
 def _load_model_vllm_server(
@@ -91,6 +149,9 @@ def _load_model_vllm_server(
         enforce_eager = True  # solves unnecessary torch compile crashes
         model_path = download_gguf_by_quant(model_path, quant_scheme)
 
+    config_quant = _detect_hf_config_quant_method(model_path)
+    vllm_quant = None if config_quant else quant_method
+
     # Build the server command declaratively
     cmd = [sys.executable, "-m", "vllm.entrypoints.openai.api_server"]
     if port is None: port = find_free_port()
@@ -108,12 +169,10 @@ def _load_model_vllm_server(
         "--gpu-memory-utilization": gpu_memory_utilization,
         "--max-num-seqs": max_concurrent_inferences,
         "--max-model-len": max_context_length,
-        # "--swap-space": str(get_swap_space_gb(max=max_swap_space_gb)),
-        # "--max-num-batched-tokens": str(max_batched_tokens),
 
         # Performance
-        "--dtype": "auto",  # should be bfloat16 if possible and float16 if not
-        "--quantization": quant_method,
+        "--dtype": "auto",
+        "--quantization": vllm_quant,
         "--enforce-eager": enforce_eager,
     }
 
@@ -163,6 +222,12 @@ def _load_model_llama_cpp(
     """
     Load a model using the llama-cpp backend
     """
+    if Llama is None:
+        raise ImportError(
+            "llama-cpp-python package is not installed in this environment.\n"
+            "Install it via: `uv pip install llama-cpp-python`"
+        )
+
     # Quantization method check
     if quant_method != "gguf":
         raise ValueError(f"Llama-cpp does not support format {quant_method}")
@@ -189,10 +254,11 @@ def load_model(
     num_gpus_to_use: int|None = None,
     gpu_memory_utilization: float = 0.9,
     *args, **kwargs,
-) -> tuple[AutoModelForCausalLM, subprocess.Popen | None]:
+) -> tuple[Any, subprocess.Popen | None]:
     """
     Create an LLM-based inference generator for solving a task
     """
+    model_path = model_path.strip().strip("'").strip('"').rstrip("\\").rstrip("/")
     # Determine number of GPUs to use
     if num_gpus_to_use is None:
         num_gpus_to_use = torch.cuda.device_count()
@@ -225,39 +291,12 @@ def load_model(
         case "vllm-serve": model, server_process = _load_model_vllm_server(**load_args)
         case "vllm-serve-async": model, server_process = _load_model_vllm_server(async_mode=True, **load_args)
         case "llama-cpp": model = _load_model_llama_cpp(**load_args)
-        case "transformers": model = _load_model_transformers(**load_args)
         case "mock": model = _load_model_mock(**load_args)
         case _: raise ValueError(f"Unknown inference backend: {inference_backend}")
 
     return model, server_process
 
 
-def _load_model_transformers(model_path: str, *args, **kwargs):
-    """Load model using standard PyTorch / HuggingFace Transformers for desktop local inference."""
-    print(f"Loading HuggingFace model and tokenizer: {model_path}")
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-
-    try:
-        model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            torch_dtype=torch_dtype,
-            device_map="auto",
-            trust_remote_code=True,
-        )
-    except Exception as e:
-        print(f"Notice: device_map='auto' failed ({e}). Loading directly to '{device}'...")
-        model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            torch_dtype=torch_dtype,
-            trust_remote_code=True,
-        ).to(device)
-
-    return (model, tokenizer)
 
 
 def _load_model_mock(*args, **kwargs):

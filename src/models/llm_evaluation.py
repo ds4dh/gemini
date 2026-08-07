@@ -13,7 +13,7 @@ import pandas as pd
 from requests.exceptions import ReadTimeout
 import torch
 
-from src.utils.plot_utils import POOLED_MODES
+from src.utils.plot_utils import POOLED_MODES, generate_combined_evaluation_dashboard
 
 
 def pool_model_predictions(
@@ -343,6 +343,7 @@ def generate_extraction_summary_and_reports(
     summary_df[patient_col] = df[patient_col]
 
     field_evaluations = {}
+    dashboard_fields_data = {}
 
     for field_name in target_field_names:
         # Find all repeat columns matching <field_name>_000, <field_name>_001, etc.
@@ -405,6 +406,11 @@ def generate_extraction_summary_and_reports(
         if gt_col is not None:
             gt_values = df[gt_col].tolist()
             summary_df[f"ground_truth_{field_name}"] = gt_values
+            dashboard_fields_data[field_name] = {
+                "field_type": field_type,
+                "y_true": gt_values,
+                "y_pred": consensus_values,
+            }
 
             # Compute evaluation metrics against ground truth
             correct_count = 0
@@ -445,6 +451,14 @@ def generate_extraction_summary_and_reports(
     summary_df.to_csv(summary_path, index=False)
     print(f"Saved summary database at: {summary_path}")
 
+    # Generate single consolidated evaluation dashboard figure
+    dashboard_filename = "evaluation_dashboard.png"
+    dashboard_path = os.path.join(run_dir, dashboard_filename)
+    created_dashboard = generate_combined_evaluation_dashboard(
+        fields_eval_data=dashboard_fields_data,
+        output_path=dashboard_path,
+    )
+
     # Build report JSON
     report_json = {
         "timestamp": datetime.datetime.now().isoformat(),
@@ -453,11 +467,12 @@ def generate_extraction_summary_and_reports(
         "quant_scheme": cfg.get("quant_scheme"),
         "total_records_processed": len(df),
         "fields_evaluation": field_evaluations,
+        "dashboard_image": dashboard_filename if created_dashboard else None,
     }
 
     report_filename = cfg.get("output", {}).get("report_filename", "extraction_report.json")
     report_json_path = os.path.join(run_dir, report_filename)
-    with open(report_json_path, "w") as f:
+    with open(report_json_path, "w", encoding="utf-8") as f:
         json.dump(report_json, f, indent=4)
 
     # Build human-readable Markdown report
@@ -483,8 +498,17 @@ def generate_extraction_summary_and_reports(
             f"| `{fname}` | `{feval['field_type']}` | {feval['completion_rate']}% | {gt_count} | {acc_str} | {mae_str} |"
         )
 
+    if created_dashboard:
+        md_lines.extend([
+            f"",
+            f"## Evaluation Dashboard",
+            f"",
+            f"![Clinical Evaluation Dashboard]({dashboard_filename})",
+            f"",
+        ])
+
     report_md_path = os.path.join(run_dir, "report.md")
-    with open(report_md_path, "w") as f:
+    with open(report_md_path, "w", encoding="utf-8") as f:
         f.write("\n".join(md_lines))
 
     print(f"Saved extraction report at: {report_json_path} and {report_md_path}")
