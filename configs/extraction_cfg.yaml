@@ -1,15 +1,12 @@
 # ==============================================================================
-# GEMINI CLINICAL TEXT EXTRACTION PIPELINE - UNIFIED CONFIGURATION
+# GEMINI CLINICAL TEXT EXTRACTION PIPELINE - EXTRACTION CONFIGURATION
 # ==============================================================================
-# Modify this single file to change what is extracted, which dataset is loaded,
-# how the model behaves, and where to write the results.
+# Define target clinical schema fields and prompt template instructions.
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
 # 1. TARGET EXTRACTION SCHEMA
 # ------------------------------------------------------------------------------
-# Define the medical variables to extract from clinical text directly below.
-# No Python code edits are needed to add or modify extraction fields!
 schema:
   name: "ClinicalVariablesExtractionSchema"
   fields:
@@ -79,57 +76,3 @@ prompt:
         "smoking_status": "<Smoker | Non-smoker | Former-smoker | Unknown>",
         "aneurysm_size_mm": <nombre décimal ou null>
       }
-
-# ------------------------------------------------------------------------------
-# 3. DATASET INPUT & PREPROCESSING
-# ------------------------------------------------------------------------------
-data:
-  input_path: "data/synthetic_clinical_notes.csv"
-  input_text_column: "input_text"
-  id_column: "patient_id"
-  sample_small_dataset: false
-  min_samples_per_class: 15
-  remove_samples_without_label: false
-
-# ------------------------------------------------------------------------------
-# 4. MODEL & INFERENCE BACKEND
-# ------------------------------------------------------------------------------
-model:
-  # Model path or HuggingFace ID
-  # model_path: "Qwen/Qwen2.5-0.5B-Instruct"
-  # model_path: "Qwen/Qwen3.5-0.8B"
-  model_path: "cyankiwi/Qwen3.5-4B-AWQ-4bit"
-
-  # Inference backend options:
-  # - "vllm" (vLLM direct GPU)
-  # - "vllm-serve-async" (vLLM OpenAI server - for high-throughput)
-  # - "llama-cpp" (GGUF llama.cpp)
-  # - "mock" (Instant dummy offline testing)
-  inference_backend: "vllm"
-
-  quant_scheme: null  # only used if "gguf" in model_path.lower()
-  enable_thinking: false
-  max_thinking_tokens: 512
-  n_inference_repeats: 1
-
-  # Generation hyperparameters
-  temperature: 0.1
-  top_p: 0.9
-  max_new_tokens: 512
-  max_context_length: 4096
-  use_output_guide: false
-  num_gpus_to_use: null
-  gpu_memory_utilization: 0.85
-  delete_model_cache_after_run: false
-
-# ------------------------------------------------------------------------------
-# 5. OUTPUT PATHS & SAVING
-# ------------------------------------------------------------------------------
-output:
-  result_dir: "./results"
-  use_timestamp_subfolder: true
-  detailed_filename: "detailed_clinical_database.csv"
-  summary_filename: "summary_clinical_database.csv"
-  report_filename: "extraction_report.json"
-  save_chunk_size: 10
-  resume_previous_run: false

@@ -1,14 +1,15 @@
 #!/bin/bash
 
 # Configuration & Paths
-CONFIG_FILE="./config.yaml"
+RUN_CONFIG="configs/run_cfg.yaml"
+EXTRACTION_CONFIG="configs/extraction_cfg.yaml"
 CURATED_DATA_PATH="data/synthetic_clinical_notes.csv"  # or /data/final/20260302_Letters_Combined.csv
 INFERENCE_BACKEND="vllm"                              # or vllm-serve-async / llama-cpp
 GPU_MEM_UTIL="0.80"
 
-# Check baseline config file
-if [ ! -f "$CONFIG_FILE" ]; then
-    echo "Error: Configuration file not found at '$CONFIG_FILE'"
+# Check baseline config files
+if [ ! -f "$RUN_CONFIG" ] || [ ! -f "$EXTRACTION_CONFIG" ]; then
+    echo "Error: Configuration files not found in configs/"
     exit 1
 fi
 

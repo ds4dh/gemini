@@ -6,7 +6,7 @@
 
 ## Features
 
-- **Single-File Configuration (`config.yaml`)**: Manage target extraction variables, prompt templates, model selection, inference backends, and output paths from a single configuration file.
+- **Modular Configuration (`configs/`)**: Manage model execution parameters (`configs/run_cfg.yaml`) and target extraction schemas & prompts (`configs/extraction_cfg.yaml`) cleanly from separate files.
 - **Dynamic Schema Engine**: Automatically generates Pydantic validation schemas at runtime based on field specifications (e.g., Modified Rankin Scale score `mRS`, `smoking_status`, `aneurysm_size_mm`, or custom clinical parameters).
 - **Multi-Backend Inference**:
   - `vllm` / `vllm-serve-async`: High-throughput GPU inference engine for desktop and HPC environments.
@@ -70,23 +70,23 @@ sbatch research-env.sbatch
 
 ### 1. Pipeline Execution (`run_pipeline.py`)
 
-Run the pipeline using `config.yaml`:
+Run the pipeline using the configuration files in `configs/`:
 
 #### Offline Test Run (Mock Backend)
 ```bash
-python run_pipeline.py --config config.yaml --backend mock
+python run_pipeline.py --backend mock
 ```
 
 #### High-Throughput GPU Inference (vLLM Backend)
 ```bash
-python run_pipeline.py --config config.yaml --backend vllm
+python run_pipeline.py --run-config configs/run_cfg.yaml --extraction-config configs/extraction_cfg.yaml
 ```
 
 ---
 
 ### 2. Target Variable Configuration
 
-Target clinical fields are defined under `schema.fields` in `config.yaml`:
+Target clinical fields are defined under `schema.fields` in `configs/extraction_cfg.yaml`:
 
 ```yaml
 schema:
@@ -158,13 +158,14 @@ Outputs `data/synthetic_clinical_notes.csv`.
 
 ```
 gemini/
-├── config.yaml                # Primary configuration file
+├── configs/
+│   ├── run_cfg.yaml           # Model, dataset, backend, and output paths
+│   └── extraction_cfg.yaml    # Target clinical schema and prompt templates
 ├── run_pipeline.py            # Primary CLI entrypoint script
 ├── pyproject.toml             # Project dependencies and packaging metadata
 ├── data/                      # Input datasets and synthetic clinical notes
 │   └── synthetic_clinical_notes.csv
 ├── results/                   # Output extracted CSV databases
-│   └── extracted_clinical_database.csv
 ├── src/
 │   ├── data/                  # Schema engine, prompting, data loading
 │   ├── models/                # LLM loaders and inference backends

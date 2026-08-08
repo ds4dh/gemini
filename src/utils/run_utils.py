@@ -123,9 +123,10 @@ def _load_config_from_yaml(config_file_path: str) -> dict:
 
 
 def load_config_files(script_args) -> dict:
-    """ Load configurations from unified single YAML file or legacy split YAML files specified in script_args
+    """ Load configurations from split YAML files (configs/run_cfg.yaml & configs/extraction_cfg.yaml)
+        or fallback single unified YAML file specified in script_args.
     """
-    # Check if a single unified config file path is provided
+    # Check if an explicit single unified config file path is provided via --config
     single_config_path = getattr(script_args, "config", None) or getattr(script_args, "config_path", None)
 
     if single_config_path and os.path.exists(single_config_path):
@@ -133,17 +134,20 @@ def load_config_files(script_args) -> dict:
         raw_cfg = _load_config_from_yaml(single_config_path)
         return normalize_pipeline_config(raw_cfg)
 
-    # Legacy fallback: Load configurations from separate YAML files
-    model_config_path = getattr(script_args, "model_config_path", "configs/model_config.yaml")
-    data_config_path = getattr(script_args, "data_config_path", "configs/data_config.yaml")
-    prompt_config_path = getattr(script_args, "prompt_config_path", "configs/prompt_config.yaml")
+    # Load split configurations: run_cfg.yaml and extraction_cfg.yaml
+    run_config_path = getattr(script_args, "run_config", None) or getattr(script_args, "run_config_path", None) or "configs/run_cfg.yaml"
+    extraction_config_path = getattr(script_args, "extraction_config", None) or getattr(script_args, "extraction_config_path", None) or "configs/extraction_cfg.yaml"
 
-    model_config = _load_config_from_yaml(model_config_path) if os.path.exists(model_config_path) else {}
-    data_config = _load_config_from_yaml(data_config_path) if os.path.exists(data_config_path) else {}
-    prompt_config = _load_config_from_yaml(prompt_config_path) if os.path.exists(prompt_config_path) else {}
+    run_cfg = _load_config_from_yaml(run_config_path) if os.path.exists(run_config_path) else {}
+    extraction_cfg = _load_config_from_yaml(extraction_config_path) if os.path.exists(extraction_config_path) else {}
 
-    run_config = {**model_config, **data_config, **prompt_config}
-    return normalize_pipeline_config(run_config)
+    if run_config_path and os.path.exists(run_config_path):
+        print(f"Loading run configuration from: {run_config_path}")
+    if extraction_config_path and os.path.exists(extraction_config_path):
+        print(f"Loading extraction configuration from: {extraction_config_path}")
+
+    merged_cfg = {**run_cfg, **extraction_cfg}
+    return normalize_pipeline_config(merged_cfg)
 
 
 def normalize_pipeline_config(raw_cfg: dict) -> dict:

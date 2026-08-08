@@ -27,10 +27,22 @@ def main():
         description="Unified Clinical Variable Extraction Pipeline using LLMs."
     )
     parser.add_argument(
+        "--run-config", "-rc",
+        type=str,
+        default="configs/run_cfg.yaml",
+        help="Path to run configuration YAML file (default: configs/run_cfg.yaml)"
+    )
+    parser.add_argument(
+        "--extraction-config", "-ec",
+        type=str,
+        default="configs/extraction_cfg.yaml",
+        help="Path to extraction configuration YAML file (default: configs/extraction_cfg.yaml)"
+    )
+    parser.add_argument(
         "--config", "-c",
         type=str,
-        default="config.yaml",
-        help="Path to unified configuration YAML file (default: config.yaml)"
+        default=None,
+        help="Path to unified single configuration YAML file (optional override)"
     )
     parser.add_argument(
         "--input-path", "-i",
@@ -166,15 +178,21 @@ def main():
 
         os.makedirs(run_dir, exist_ok=True)
 
-        # Save config file snapshot for complete experiment reproducibility
-        run_config_path = os.path.join(run_dir, "config.yaml")
+        # Save config file snapshots for complete experiment reproducibility
         try:
-            if os.path.exists(args.config):
-                shutil.copyfile(args.config, run_config_path)
-            else:
-                with open(run_config_path, "w") as f:
-                    yaml.dump(cfg, f, default_flow_style=False)
-            print(f"Saved config snapshot at: {run_config_path}")
+            rc_dest = os.path.join(run_dir, "run_cfg.yaml")
+            ec_dest = os.path.join(run_dir, "extraction_cfg.yaml")
+            rc_src = getattr(args, "run_config", "configs/run_cfg.yaml")
+            ec_src = getattr(args, "extraction_config", "configs/extraction_cfg.yaml")
+            if os.path.exists(rc_src):
+                shutil.copyfile(rc_src, rc_dest)
+            if os.path.exists(ec_src):
+                shutil.copyfile(ec_src, ec_dest)
+            
+            # Fallback single config snapshot if provided
+            if args.config and os.path.exists(args.config):
+                shutil.copyfile(args.config, os.path.join(run_dir, "config.yaml"))
+            print(f"Saved config snapshots at: {run_dir}")
         except Exception as e:
             print(f"Notice: Could not write config snapshot ({e})")
 
