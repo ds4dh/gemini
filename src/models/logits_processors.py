@@ -1,7 +1,9 @@
-import os
 import math
 import numpy as np
 import torch
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import Any
 try:
     import xgrammar as xgr
 except ImportError:

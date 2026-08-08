@@ -9,6 +9,7 @@ from datasets import Dataset
 from pydantic import BaseModel
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 from tqdm import tqdm
+from tqdm.asyncio import tqdm_asyncio
 
 try:
     from vllm import LLM, RequestOutput, SamplingParams
@@ -100,38 +101,30 @@ def _setup_inference_output(
     output_schema_model: Type[BaseModel] | None,
     enable_thinking: bool = True,
     max_thinking_tokens: int | None = None,
+    use_output_guide: bool = True,
 ) -> tuple[dict | None, dict]:
     """
     Define how output is influenced during inference
     """
-    # Structured output guiding
-    # THIS WAS REMOVED FOR A LOGIT PROCESSOR!
-    response_format = None
-    # if output_schema_model is not None:
-    #     response_format = {
-    #         "type": "json_schema",
-    #         "json_schema": {
-    #             "name": output_schema_model.__name__,
-    #             "schema": output_schema_model.model_json_schema(),
-    #         },
-    #     }
-
-    # Arguments for logit processors
     extra_body = {}
-    if enable_thinking == False:  # only for false! if True: should stay undefined
+    if enable_thinking == False:
         extra_body = {"chat_template_kwargs": {"enable_thinking": enable_thinking}}
+    
     vllm_xargs = {}
     if max_thinking_tokens is not None:
         vllm_xargs["max_thinking_tokens"] = max_thinking_tokens
-    if output_schema_model is not None:
+        
+    # Only attach json_schema if use_output_guide is True
+    if use_output_guide and output_schema_model is not None:
         schema_dict = output_schema_model.model_json_schema()
         schema_str = json.dumps(schema_dict)
         safe_schema_str = schema_str.replace("'", "\\u0027")
         vllm_xargs["json_schema"] = safe_schema_str
+
     if vllm_xargs:
         extra_body["vllm_xargs"] = vllm_xargs
 
-    return response_format, extra_body
+    return None, extra_body
 
 
 def _infer_vllm_serve(
@@ -231,8 +224,8 @@ async def _infer_vllm_serve_async(
 
     # Query the server for all tasks concurrently
     tasks = [generate_vllm_outputs(messages) for messages in dataset["messages"]]
-    all_outputs = await anext.gather(*tasks, desc="Querying vLLM server (async)")
-
+    all_outputs = await tqdm_asyncio.gather(*tasks, desc="Querying vLLM server (async)")
+    
     return all_outputs
 
 
@@ -308,6 +301,7 @@ def process_samples(
         "output_schema_model": output_schema_model,
         "enable_thinking": enable_thinking,
         "max_thinking_tokens": max_thinking_tokens,
+        "use_output_guide": kwargs.get("use_output_guide", False),
         **kwargs,
     }
 

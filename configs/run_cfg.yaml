@@ -9,7 +9,8 @@
 # 1. DATASET INPUT & PREPROCESSING
 # ------------------------------------------------------------------------------
 data:
-  input_path: "data/synthetic_clinical_notes.csv"
+  # input_path: "data/synthetic_clinical_notes.csv"
+  input_path: "data/data_2024/processed/dataset.csv"
   input_text_column: "input_text"
   id_column: "patient_id"
   sample_small_dataset: false
@@ -22,20 +23,27 @@ data:
 model:
   # Model path or HuggingFace ID
   # model_path: "Qwen/Qwen2.5-0.5B-Instruct"
+  # model_path: "Qwen/Qwen3-0.6B"
   # model_path: "Qwen/Qwen3.5-0.8B"
-  model_path: "cyankiwi/Qwen3.5-4B-AWQ-4bit"
+  # model_path: "cyankiwi/Qwen3.5-4B-AWQ-4bit"
+  model_path: "cyankiwi/Qwen3.6-27B-AWQ-INT4"
 
   # Inference backend options:
   # - "vllm" (vLLM direct GPU)
   # - "vllm-serve-async" (vLLM OpenAI server - for high-throughput)
   # - "llama-cpp" (GGUF llama.cpp)
   # - "mock" (Instant dummy offline testing)
-  inference_backend: "vllm"
+  inference_backend: "vllm-serve-async"
   n_inference_repeats: 10
   quant_scheme: null  # used only if "gguf" in model_path.lower()
-  enable_thinking: false
-  use_output_guide: false  # used only if backend is "vllm-serve-async"
-  max_thinking_tokens: 512  # used only if backend is "vllm-serve-async"; set to null to deactivate
+
+  # Logits processors and output guiding
+  enable_thinking: true
+  use_output_guide: true  # set to true when you want guided JSON
+  max_thinking_tokens: 512  # handled by ThinkingBudgetProcessor
+  logits_processors:  # register custom vLLM Logit Processors for vLLM server:
+    - "src.models.logits_processors:ThinkingBudgetProcessor"
+    - "src.models.logits_processors:JSONParsingProcessor"
 
   # Generation hyperparameters
   temperature: 0.1
@@ -43,7 +51,9 @@ model:
   max_new_tokens: 512
   max_context_length: 4096
   num_gpus_to_use: null
-  gpu_memory_utilization: 0.85
+  enforce_eager: true  # if true, lowers GPU memory usage (no CUDA graph caching)
+  gpu_memory_utilization: 0.88  # this gives more space for vLLM, but avoid too close to 1.0
+  max_concurrent_inferences: 32  # only used if backend == vllm-serve-async
   delete_model_cache_after_run: false
 
 # ------------------------------------------------------------------------------

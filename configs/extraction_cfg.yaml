@@ -17,16 +17,16 @@ schema:
       le: 6
       default: -1
 
-    smoking_status:
-      type: "enum"
-      description: "Patient smoking habit classification"
-      enum_values: ["Smoker", "Non-smoker", "Former-smoker", "Unknown"]
-      default: "Unknown"
+    # smoking_status:
+    #   type: "enum"
+    #   description: "Patient smoking habit classification"
+    #   enum_values: ["Smoker", "Non-smoker", "Former-smoker", "Unknown"]
+    #   default: "Unknown"
 
-    aneurysm_size_mm:
-      type: "float"
-      description: "Maximum diameter of intracranial aneurysm in millimeters if present, else null"
-      default: null
+    # aneurysm_size_mm:
+    #   type: "float"
+    #   description: "Maximum diameter of intracranial aneurysm in millimeters if present, else null"
+    #   default: null
 
 # ------------------------------------------------------------------------------
 # 2. PROMPT TEMPLATES & TASK CONTEXT

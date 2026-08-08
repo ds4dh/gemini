@@ -55,6 +55,7 @@ def _load_model_vllm(
     max_context_length: int|None = None,
     num_gpus_to_use: int|None = None,
     gpu_memory_utilization: float = 0.9,
+    enforce_eager: bool = True,
     *args, **kwargs
 ):
     """
@@ -80,7 +81,7 @@ def _load_model_vllm(
         "max_model_len": max_context_length,
         "tensor_parallel_size": num_gpus_to_use,
         "gpu_memory_utilization": gpu_memory_utilization,
-        "enforce_eager": True if sys.platform == "win32" else False,
+        "enforce_eager": enforce_eager,
     }
 
     # Check if quantization method is already defined in model's config.json
@@ -128,25 +129,26 @@ def _load_model_vllm_server(
     max_context_length: int | None = None,
     max_concurrent_inferences: int | None = None,
     num_gpus_to_use: int = 1,
-    gpu_memory_utilization: float = 0.9,
+    gpu_memory_utilization: float = 0.90,
+    enforce_eager: bool = True,
     max_swap_space_gb: int = 8,
     max_batched_tokens: int = 32768,
     host: str = "localhost",
     port: int | None = None,
-    client_timeout: int | float = 43200,  # 7200,
+    client_timeout: int | float = 43200,  # 7200
     async_mode: bool = False,
     *args, **kwargs,
-) -> tuple[OpenAI, subprocess.Popen]:
+) -> tuple[OpenAI | AsyncOpenAI, subprocess.Popen]:
     """
     Launches a vLLM OpenAI-compatible server as a background process,
     allowing its output to stream to the terminal, and returns a client
     and the server process handle.
     """
-    # Special case for gguf models, where model file is pre-downloaded locally
     tokenizer_name = get_tokenizer_name(model_path)
-    enforce_eager = None
+    
+    # Special case for GGUF models: download locally and force eager mode
     if quant_method == "gguf":
-        enforce_eager = True  # solves unnecessary torch compile crashes
+        enforce_eager = True  # solves unnecessary torch compile crashes on GGUF
         model_path = download_gguf_by_quant(model_path, quant_scheme)
 
     config_quant = _detect_hf_config_quant_method(model_path)
@@ -154,7 +156,9 @@ def _load_model_vllm_server(
 
     # Build the server command declaratively
     cmd = [sys.executable, "-m", "vllm.entrypoints.openai.api_server"]
-    if port is None: port = find_free_port()
+    if port is None: 
+        port = find_free_port()
+
     params = {
         # Server configuration
         "--host": host,
@@ -182,7 +186,7 @@ def _load_model_vllm_server(
             continue
         cmd.append(key)
         if isinstance(value, bool):
-            continue  # for True booleans, only key, no value
+            continue  # for True booleans, only key is added (e.g. --enforce-eager)
         if isinstance(value, (list, tuple)):
             cmd.extend([str(v) for v in value])
         else:
@@ -253,6 +257,7 @@ def load_model(
     use_flash_attention: bool = False,
     num_gpus_to_use: int|None = None,
     gpu_memory_utilization: float = 0.9,
+    enforce_eager: bool = True,
     *args, **kwargs,
 ) -> tuple[Any, subprocess.Popen | None]:
     """
@@ -282,6 +287,7 @@ def load_model(
         "num_gpus_to_use": num_gpus_to_use,
         "gpu_memory_utilization": gpu_memory_utilization,
         "use_flash_attention": use_flash_attention,
+        "enforce_eager": enforce_eager,
     }
 
     # Load model and tokenizer

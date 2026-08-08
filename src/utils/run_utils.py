@@ -218,6 +218,10 @@ def normalize_pipeline_config(raw_cfg: dict) -> dict:
     cfg.setdefault("top_p", 0.9)
     cfg.setdefault("use_output_guide", False)
     cfg.setdefault("delete_model_cache_after_run", False)
+    cfg.setdefault("logits_processors", [
+        "src.models.logits_processors:ThinkingBudgetProcessor",
+        "src.models.logits_processors:JSONParsingProcessor",
+    ])
 
     return cfg
 

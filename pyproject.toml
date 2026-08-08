@@ -22,7 +22,7 @@ classifiers = [
 
 # Dependencies (uv pip install -e .)
 dependencies = [
-    "vllm==0.15.1; sys_platform != 'win32'",
+    "vllm==0.26.0; sys_platform != 'win32'",
     "flashinfer-python; sys_platform != 'win32'",
     "transformers",
     "datasets",
