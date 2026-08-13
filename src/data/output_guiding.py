@@ -1,6 +1,8 @@
 import json
 import re
-from typing import Any, Type
+import types
+import typing
+from typing import Any, List, Type, Optional, Union
 
 import json5
 from pydantic import BaseModel, ValidationError
@@ -23,6 +25,115 @@ def resolve_schema_model(schema_arg: Any) -> Type[BaseModel]:
     return create_dynamic_pydantic_schema({})
 
 
+def _unwrap_type(annotation: Any) -> Any:
+    """
+    Unwrap Optional, Union, and Annotated types to get the base underlying type (int, float, str, bool, list).
+    """
+    if annotation is None:
+        return str
+
+    origin = getattr(annotation, "__origin__", None)
+    if origin is typing.Union or origin is types.UnionType:
+        args = [a for a in annotation.__args__ if a is not type(None)]
+        if args:
+            return _unwrap_type(args[0])
+
+    if hasattr(annotation, "__args__") and annotation.__args__:
+        if origin is list or origin is List:
+            return annotation
+
+    return annotation
+
+
+def _extract_json_candidates(raw_output: str) -> list[str]:
+    """
+    Extracts potential JSON strings from raw LLM output using multiple strategies:
+    1. Post-think block (content after </think>, </reasoning>, or </thought>)
+    2. Markdown code fences (```json ... ```)
+    3. Balanced brace JSON objects/arrays extracted from text
+    4. Substring bounded by first and last brace
+    """
+    candidates = []
+
+    # Strategy 1: Post-thinking content (if thinking tags exist)
+    think_match = re.search(r"</(?:think|reasoning|thought)>\s*(.*)", raw_output, re.IGNORECASE | re.DOTALL)
+    if think_match and think_match.group(1).strip():
+        post_think = think_match.group(1).strip()
+        candidates.append(post_think)
+
+    # Strategy 2: Code blocks ```json ... ``` or ``` ... ```
+    code_fence_matches = re.findall(r"```(?:json)?\s*({[\s\S]*?}|\[[\s\S]*?\])\s*```", raw_output, re.IGNORECASE)
+    for block in reversed(code_fence_matches):  # Reversed to prioritize the last code block
+        if block.strip() and block.strip() not in candidates:
+            candidates.append(block.strip())
+
+    # Strategy 3: Find all balanced JSON objects {...} or arrays [...] using bracket stack
+    def find_balanced_blocks(text: str) -> list[str]:
+        blocks = []
+        n = len(text)
+        i = 0
+        while i < n:
+            if text[i] in ("{", "["):
+                start = i
+                open_char = text[i]
+                close_char = "}" if open_char == "{" else "]"
+                depth = 0
+                in_string = False
+                escape = False
+                for j in range(i, n):
+                    char = text[j]
+                    if in_string:
+                        if escape:
+                            escape = False
+                        elif char == "\\":
+                            escape = True
+                        elif char == '"':
+                            in_string = False
+                    else:
+                        if char == '"':
+                            in_string = True
+                        elif char == open_char:
+                            depth += 1
+                        elif char == close_char:
+                            depth -= 1
+                            if depth == 0:
+                                blocks.append(text[start : j + 1])
+                                i = j
+                                break
+            i += 1
+        return blocks
+
+    balanced_blocks = find_balanced_blocks(raw_output)
+    # Reverse balanced blocks so that the last JSON object (final answer) is tested first
+    for block in reversed(balanced_blocks):
+        if block not in candidates:
+            candidates.append(block)
+
+    # Strategy 4: Fallback range from first '{' to last '}' or '[' to ']'
+    try:
+        start_brace = raw_output.find("{")
+        start_bracket = raw_output.find("[")
+        if start_brace != -1 or start_bracket != -1:
+            if start_brace != -1 and (start_bracket == -1 or start_brace < start_bracket):
+                start = start_brace
+                end = raw_output.rindex("}") + 1
+            else:
+                start = start_bracket
+                end = raw_output.rindex("]") + 1
+            fallback_candidate = raw_output[start:end]
+            if fallback_candidate not in candidates:
+                candidates.append(fallback_candidate)
+    except ValueError:
+        pass
+
+    # Strategy 5: Full output trimmed
+    trimmed = raw_output.strip()
+    if trimmed not in candidates:
+        candidates.append(trimmed)
+
+    return candidates
+
+
 def extract_structured_output(
     sample: dict[str, Any],
     output_schema_model: Type[BaseModel],
@@ -37,69 +148,58 @@ def extract_structured_output(
         print("Warning: Missing or empty column to structure. Returning default.")
         return _get_default_values(output_schema_model)
 
-    # Direct Pydantic parse
-    try:
-        validated_output = output_schema_model.model_validate_json(raw_output.strip())
-        # print("Success: Direct parsing successful.")
-        return validated_output.model_dump()
-    except Exception:
-        pass
+    candidates = _extract_json_candidates(raw_output)
 
-    # Isolate JSON block (from markdown or first/last braces)
-    json_candidate = raw_output
-    match = re.search(r"```(?:json)?\s*({.*}|\[.*\])\s*```", raw_output, re.DOTALL)
-    if match:
-        json_candidate = match.group(1)
-    else:
+    # Attempt parsing each candidate (prioritizing post-think and final JSON candidates)
+    for candidate in candidates:
+        # 1. Direct Pydantic parse
         try:
-            start_brace = raw_output.find("{")
-            start_bracket = raw_output.find("[")
-
-            if start_brace == -1 and start_bracket == -1:
-                raise ValueError("No JSON object or array found")
-
-            if start_brace != -1 and (start_bracket == -1 or start_brace < start_bracket):
-                start = start_brace
-                end_char = "}"
-            else:
-                start = start_bracket
-                end_char = "]"
-
-            end = raw_output.rindex(end_char) + 1
-            json_candidate = raw_output[start:end]
-        except ValueError:
+            validated_output = output_schema_model.model_validate_json(candidate)
+            return validated_output.model_dump()
+        except Exception:
             pass
-    try:
-        validated_output = output_schema_model.model_validate_json(json_candidate)
-        print("Success: Isolated and parsed JSON block.")
-        return validated_output.model_dump()
-    except Exception:
-        pass
 
-    # Parse with lenient json5 library
-    try:
-        data = json5.loads(json_candidate)
-        validated_output = output_schema_model.model_validate(data)
-        print("Success: Parsed with lenient json5 library.")
-        return validated_output.model_dump()
-    except Exception:
-        pass
+        # 2. Parse with lenient json5 library + Pydantic model validation
+        try:
+            data = json5.loads(candidate)
+            if isinstance(data, dict):
+                validated_output = output_schema_model.model_validate(data)
+                return validated_output.model_dump()
+        except Exception:
+            pass
 
-    # Attempt to repair truncated JSON
-    try:
-        repaired_json = _repair_truncated_json(json_candidate)
-        validated_output = output_schema_model.model_validate_json(repaired_json)
-        print("Success: Repaired truncated JSON and parsed.")
-        return validated_output.model_dump()
-    except Exception:
-        pass
+        # 3. Attempt to repair truncated JSON
+        try:
+            repaired_json = _repair_truncated_json(candidate)
+            validated_output = output_schema_model.model_validate_json(repaired_json)
+            return validated_output.model_dump()
+        except Exception:
+            pass
 
-    # Field-by-field regex extraction
-    print("Warning: All parsing methods failed. Attempting field-by-field regex extraction.")
+        try:
+            repaired_data = json5.loads(repaired_json)
+            if isinstance(repaired_data, dict):
+                validated_output = output_schema_model.model_validate(repaired_data)
+                return validated_output.model_dump()
+        except Exception:
+            pass
+
+    # Field-by-field regex extraction on post-think text or raw output
+    print("Warning: All JSON block parsing methods failed. Attempting field-by-field regex extraction.")
     extracted_data = {}
+    
+    # Strip thinking block for regex searching if present
+    search_text = raw_output
+    think_match = re.search(r"</(?:think|reasoning|thought)>\s*(.*)", raw_output, re.IGNORECASE | re.DOTALL)
+    if think_match and think_match.group(1).strip():
+        search_text = think_match.group(1).strip()
+
     try:
         for field_name, field_info in output_schema_model.model_fields.items():
-            value = _extract_field_with_regex(json_candidate, field_name, field_info.annotation)
+            base_type = _unwrap_type(field_info.annotation)
+            value = _extract_field_with_regex(search_text, field_name, base_type)
+            if value is None and search_text != raw_output:
+                value = _extract_field_with_regex(raw_output, field_name, base_type)
             if value is not None:
                 extracted_data[field_name] = value
     except Exception as e:
@@ -146,27 +246,30 @@ def _extract_field_with_regex(
     field_type: Type,
 ) -> Any | None:
     """
-    Extract a single field value using a type-aware regex pattern
+    Extract a single field value using a type-aware regex pattern.
+    Uses re.findall / last match to prefer final answer over reasoning prompt text.
     """
     # Pattern for null
     pattern_null = rf'"{field_name}"\s*:\s*null'
-    if re.search(pattern_null, text):
+    if re.search(pattern_null, text, re.IGNORECASE):
         return None
     
     # Pattern for string
     if field_type == str:
         pattern = rf'"{field_name}"\s*:\s*"((?:\\"|[^"])*)"'
-        match = re.search(pattern, text)
-        return match.group(1).replace('\\"', '"') if match else None
+        matches = re.findall(pattern, text)
+        if matches:
+            return matches[-1].replace('\\"', '"')
+        return None
 
     # Pattern for number (int/float)
     if field_type in (int, float):
         pattern = rf'"{field_name}"\s*:\s*(-?\d+(?:\.\d+)?)'
-        match = re.search(pattern, text)
-        if not match:
+        matches = re.findall(pattern, text)
+        if not matches:
             return None
         try:
-            val = field_type(match.group(1))
+            val = field_type(matches[-1])
             if isinstance(val, int) and (val > 2**63 - 1 or val < -2**63):
                 return -1
             return val
@@ -176,25 +279,24 @@ def _extract_field_with_regex(
     # Pattern for boolean
     if field_type == bool:
         pattern = rf'"{field_name}"\s*:\s*(true|false)'
-        match = re.search(pattern, text)
-        return match.group(1) == 'true' if match else None
+        matches = re.findall(pattern, text, re.IGNORECASE)
+        if matches:
+            return matches[-1].lower() == 'true'
+        return None
         
     # Pattern for lists of strings or numbers
-    if hasattr(field_type, "__origin__") and field_type.__origin__ == list:
-
-        # Simple case: list of strings
+    if hasattr(field_type, "__origin__") and field_type.__origin__ in (list, List):
         pattern_str = rf'"{field_name}"\s*:\s*\[\s*((?:"(?:\\"|[^"])*"\s*,\s*)*"(?:\\"|[^"])*")\s*\]'
-        match = re.search(pattern_str, text)
-        if match:
-            return [s.strip().strip('"') for s in match.group(1).split(',') if s.strip()]
+        matches = re.findall(pattern_str, text)
+        if matches:
+            return [s.strip().strip('"') for s in matches[-1].split(',') if s.strip()]
 
-        # Simple case: list of numbers
         pattern_num = rf'"{field_name}"\s*:\s*\[\s*((-?\d+(?:\.\d+)?\s*,\s*)*-?\d+(?:\.\d+)?)\s*\]'
-        match = re.search(pattern_num, text)
-        if match:
-            item_type = field_type.__args__[0]
+        matches = re.findall(pattern_num, text)
+        if matches:
+            item_type = field_type.__args__[0] if getattr(field_type, "__args__", None) else int
             try:
-                return [item_type(n.strip()) for n in match.group(1).split(',') if n.strip()]
+                return [item_type(n.strip()) for n in matches[-1].split(',') if n.strip()]
             except (ValueError, TypeError):
                 return None
 
@@ -213,7 +315,7 @@ def _get_default_values(model: Type[BaseModel]) -> dict[str, Any]:
             defaults[name] = field.default
         else:
             field_type = field.annotation
-            if hasattr(field_type, "__origin__") and field_type.__origin__ == list:
+            if hasattr(field_type, "__origin__") and field_type.__origin__ in (list, List):
                 defaults[name] = []
             else:
                 defaults[name] = None

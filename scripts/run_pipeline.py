@@ -188,7 +188,8 @@ def run_model(
     cfg: dict[str, Any],
 ) -> None:
     """
-    Constructs prompts, executes model inference, and saves detailed/summary outputs.
+    Constructs prompts, executes model inference incrementally, and saves detailed/summary outputs.
+    Supports resuming previous runs if resume_previous_run is enabled.
     """
     print("Building prompt messages for LLM...")
     dataset = dataset.map(
@@ -196,15 +197,34 @@ def run_model(
         desc="Constructing chat prompts",
     )
 
-    print(f"\nRunning extraction pipeline ({cfg['inference_backend']} backend)...")
-    infer_cfg = {k: v for k, v in cfg.items() if k not in ("model", "dataset")}
-    dataset_with_outputs = process_samples(model=model, dataset=dataset, **infer_cfg)
+    base_output_dir = cfg.get("result_dir", "./results")
+    use_timestamp = cfg.get("use_timestamp_subfolder", True)
+    resume_run = cfg.get("resume_previous_run", False)
+    detailed_filename = cfg.get("output", {}).get("detailed_filename", "detailed_clinical_database.csv")
+    if not detailed_filename.endswith(".csv"):
+        detailed_filename = "detailed_clinical_database.csv"
 
     # Determine run output directory
-    base_output_dir = cfg.get("result_dir", "./results")
-    if cfg.get("use_timestamp_subfolder", True):
-        timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_dir = os.path.join(base_output_dir, f"run_{timestamp_str}")
+    run_dir = None
+    if use_timestamp:
+        # Check if resuming and an existing run subfolder with progress exists
+        if resume_run and os.path.exists(base_output_dir):
+            existing_runs = sorted(
+                [d for d in os.listdir(base_output_dir) if d.startswith("run_") and os.path.isdir(os.path.join(base_output_dir, d))],
+                reverse=True,
+            )
+            for er in existing_runs:
+                candidate_dir = os.path.join(base_output_dir, er)
+                chunks_file = os.path.join(candidate_dir, detailed_filename.replace(".csv", "_chunks.csv"))
+                detailed_file = os.path.join(candidate_dir, detailed_filename)
+                if os.path.exists(chunks_file) or os.path.exists(detailed_file):
+                    run_dir = candidate_dir
+                    print(f"Resuming existing run folder: {run_dir}")
+                    break
+
+        if run_dir is None:
+            timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            run_dir = os.path.join(base_output_dir, f"run_{timestamp_str}")
     else:
         run_dir = base_output_dir
 
@@ -228,25 +248,85 @@ def run_model(
     except Exception as e:
         print(f"Notice: Could not write config snapshot ({e})")
 
-    # Export detailed CSV outputs
-    detailed_filename = cfg.get("output", {}).get("detailed_filename", "detailed_clinical_database.csv")
-    if not detailed_filename.endswith(".csv"):
-        detailed_filename = "detailed_clinical_database.csv"
-
     detailed_csv_path = os.path.join(run_dir, detailed_filename)
-    df_results: pd.DataFrame = dataset_with_outputs.to_pandas()
-    df_results.to_csv(detailed_csv_path, index=False)
+    chunks_csv_path = detailed_csv_path.replace(".csv", "_chunks.csv")
+
+    # Determine unique ID column to track already processed records
+    id_col = cfg.get("id_column") or "patient_id"
+    if id_col not in dataset.column_names:
+        id_col = "input_text"
+
+    # Handle resume logic vs fresh run
+    processed_ids: set[Any] = set()
+    if resume_run:
+        target_resume_file = chunks_csv_path if os.path.exists(chunks_csv_path) else (detailed_csv_path if os.path.exists(detailed_csv_path) else None)
+        if target_resume_file:
+            try:
+                df_existing = pd.read_csv(target_resume_file)
+                if id_col in df_existing.columns:
+                    processed_ids = set(df_existing[id_col].dropna())
+                elif "input_text" in df_existing.columns:
+                    processed_ids = set(df_existing["input_text"].dropna())
+                print(f"RESUME ACTIVE: Found {len(processed_ids)} already processed records in {target_resume_file}.")
+            except Exception as e:
+                print(f"Warning: Could not read existing progress file for resume ({e}). Starting fresh.")
+    else:
+        # If not resuming, remove any leftover chunk file
+        if os.path.exists(chunks_csv_path):
+            os.remove(chunks_csv_path)
+
+    # Filter out already processed records
+    if processed_ids:
+        initial_len = len(dataset)
+        dataset = dataset.filter(
+            lambda row: row.get(id_col) not in processed_ids and row.get("input_text") not in processed_ids
+        )
+        print(f"Filtered dataset: {initial_len} total records -> {len(dataset)} remaining records to process.")
+
+    num_samples = len(dataset)
+
+    if num_samples == 0:
+        print("\nAll records have already been processed! No new inference required.")
+        if os.path.exists(chunks_csv_path):
+            df_results = pd.read_csv(chunks_csv_path)
+            df_results.to_csv(detailed_csv_path, index=False)
+        elif os.path.exists(detailed_csv_path):
+            df_results = pd.read_csv(detailed_csv_path)
+        else:
+            raise RuntimeError("No records to process and no existing results CSV found.")
+    else:
+        # Run inference incrementally in chunks
+        chunk_size = cfg.get("save_chunk_size", 10) or 10
+        infer_cfg = {k: v for k, v in cfg.items() if k not in ("model", "dataset")}
+
+        print(f"\nRunning extraction pipeline in incremental chunks of {chunk_size} ({cfg['inference_backend']} backend)...")
+        for i in range(0, num_samples, chunk_size):
+            chunk_end = min(i + chunk_size, num_samples)
+            print(f"Processing batch chunk [{i + 1} to {chunk_end}] of {num_samples} remaining samples...")
+
+            chunk_dataset = dataset.select(range(i, chunk_end))
+            chunk_with_outputs = process_samples(model=model, dataset=chunk_dataset, **infer_cfg)
+            df_chunk: pd.DataFrame = chunk_with_outputs.to_pandas()
+
+            # Append chunk to disk immediately
+            header_needed = not os.path.exists(chunks_csv_path)
+            df_chunk.to_csv(chunks_csv_path, mode="a", index=False, header=header_needed)
+            print(f"  Saved chunk [{i + 1}..{chunk_end}] to {chunks_csv_path}")
+
+        # Combine all processed records into final detailed CSV
+        df_results = pd.read_csv(chunks_csv_path)
+        df_results.to_csv(detailed_csv_path, index=False)
 
     # Generate summary metrics, report JSON, and report MD
     summary_df, report_json = generate_extraction_summary_and_reports(df_results, cfg, run_dir)
 
     print("\n================================================================")
     print(" EXTRACTION & EVALUATION COMPLETED SUCCESSFULLY!")
-    print(f" Total Processed: {len(df_results)} records")
-    print(f" Output Directory:{os.path.abspath(run_dir)}")
-    print(f" Detailed CSV:    {detailed_filename}")
-    print(f" Summary CSV:     {cfg.get('output', {}).get('summary_filename', 'summary_clinical_database.csv')}")
-    print(" Report Files:    extraction_report.json & report.md")
+    print(f" Total Records in Database: {len(df_results)}")
+    print(f" Output Directory:         {os.path.abspath(run_dir)}")
+    print(f" Detailed CSV:            {detailed_filename}")
+    print(f" Summary CSV:             {cfg.get('output', {}).get('summary_filename', 'summary_clinical_database.csv')}")
+    print(" Report Files:            extraction_report.json & report.md")
     print("================================================================")
 
     print("\nSummary Consensus Database Preview:")
