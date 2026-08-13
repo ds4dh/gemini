@@ -79,7 +79,6 @@ prompt:
          - Diamètre maximal de l'anévrisme intracrânien converti en millimètres (mm). Si la taille est exprimée en cm (ex: 1.2 cm, 0.45 cm), convertis-la obligatoirement en mm (ex: 12.0, 4.5).
          - Retourne null si aucun anévrisme n'est décelé ou si l'imagerie est normale.
     output_specifications: |
-      Raisonne uniquement à l'intérieur des balises <think> et </think>.
       La réponse finale doit être un objet JSON strict sans texte additionnel, avec le format suivant:
       {
         "mRS": <nombre entier entre 0 et 6 ou null>,

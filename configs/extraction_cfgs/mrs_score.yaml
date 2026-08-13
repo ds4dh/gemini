@@ -58,7 +58,6 @@ prompt:
          - null (Inconnu) : Uniquement si le score mRS ne peut pas être déduit.
 
     output_specifications: |
-      Raisonne uniquement à l'intérieur des balises <think> et </think>.
       La réponse finale doit être un objet JSON strict sans texte additionnel, avec le format suivant:
       {
         "mRS": <nombre entier entre 0 et 6 ou null>

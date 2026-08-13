@@ -26,7 +26,7 @@ output:
   detailed_filename: "detailed_clinical_database.csv"
   summary_filename: "summary_clinical_database.csv"
   report_filename: "extraction_report.json"
-  save_chunk_size: 10
+  save_chunk_size: 100
   resume_previous_run: false
 
 # --------------------------------------------------------------------------------
@@ -39,6 +39,7 @@ model:
   # model_path: "Qwen/Qwen3.5-0.8B"
   # model_path: "cyankiwi/Qwen3.5-4B-AWQ-4bit"
   model_path: "cyankiwi/Qwen3.6-27B-AWQ-INT4"
+  quant_scheme: null  # used only if "gguf" in model_path.lower()
 
   # Inference backend options:
   # - "vllm" (vLLM direct GPU)
@@ -46,13 +47,12 @@ model:
   # - "llama-cpp" (GGUF llama.cpp)
   # - "mock" (Instant dummy offline testing)
   inference_backend: "vllm-serve-async"
-  quant_scheme: null  # used only if "gguf" in model_path.lower()
   n_inference_repeats: 10
   max_concurrent_inferences: 32  # only used if backend == vllm-serve-async
-  delete_model_cache_after_run: false
-  enforce_eager: true  # if true, trades efficiency for lower GPU memory usage (no CUDA graph caching)
   num_gpus_to_use: null
   gpu_memory_utilization: 0.90  # this gives more space for vLLM, but avoid too close to 1.0
+  delete_model_cache_after_run: false
+  enforce_eager: true  # if true, trades efficiency for lower GPU memory usage (no CUDA graph caching)
 
   # Logits processors and output guiding
   enable_thinking: true
