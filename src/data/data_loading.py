@@ -1,9 +1,8 @@
-import argparse
 import os
-
+import argparse
+import numpy as np
 import pandas as pd
 from datasets import Dataset
-
 from src.data.encryption import read_pandas_from_encrypted_file
 
 
@@ -12,8 +11,7 @@ def load_data_formatted_for_benchmarking(
     use_curated_dataset: bool = False,
     add_curated_dataset: bool = False,
     remove_samples_without_label: bool = False,
-    sample_small_dataset: bool = False,
-    min_samples_per_class: int = 200,
+    max_samples: int | None = None,
     input_path: str = None,
     input_text_column: str = "input_text",
     *args, **kwargs,
@@ -88,36 +86,90 @@ def load_data_formatted_for_benchmarking(
         else:
             raise KeyError(f"Missing mandatory input text column in dataset. Available columns: {list(df_data.columns)}")
 
-    # Optional label filtering (only if label column exists)
-    if "label" in df_data.columns and remove_samples_without_label:
-        print("Filtering out samples without labels.")
-        df_data = df_data.dropna(subset=["label"])
+    gt_columns = [col for col in df_data.columns if col.endswith("_ground_truth")]
+    if remove_samples_without_label:
+        if gt_columns:
+            original_count = len(df_data)  # keep a row if at least one target feature has ground truth
+            df_data = df_data.dropna(subset=gt_columns, how="all").reset_index(drop=True)
+            print("Removed rows without any ground-truth target: " f"{original_count} -> {len(df_data)}.")
+        else:
+            print("Warning: remove_samples_without_label=True, but no '*_ground_truth' columns were found. No rows removed.")
 
-    # Optional small balanced dataset sampling (only if label column exists)
-    if sample_small_dataset and "label" in df_data.columns:
-        df_data = sample_small_balanced_dataset(df_data, min_samples_per_class)
-    elif sample_small_dataset and len(df_data) > min_samples_per_class:
-        print(f"Sampling small dataset of {min_samples_per_class} rows.")
-        df_data = df_data.head(min_samples_per_class)
+    # Optional subsampling for debug
+    if max_samples is not None:
+        df_data = sample_small_balanced_dataset(df_data=df_data, max_samples=max_samples, gt_columns=gt_columns)
 
     return Dataset.from_pandas(df_data)
 
 
 def sample_small_balanced_dataset(
     df_data: pd.DataFrame,
-    min_samples_per_class: int = 200,
+    max_samples: int = 200,
+    gt_columns: list[str] | None = None,
+    random_state: int = 1234,
 ) -> pd.DataFrame:
     """
-    Select a small portion of the data that has more or less balanced classes.
+    Build a small, reproducible debug subset distributed across combined ground-truth profiles.
+    A profile is the tuple of all values in the available '<feature_name>_ground_truth' columns for one row.
+    This works with:
+    - multiple target features;
+    - categorical, ordinal, binary, and continuous target values;
+    - rows with partial or fully missing ground truth;
+    - datasets without any ground-truth columns.
+    The returned DataFrame contains at most max_samples rows.
     """
-    print("Sampling a small, balanced dataset.")
-    sampled_chunks = []
-    for _, group in df_data.groupby("label"):
-        chunk = group.sample(n=min(len(group), min_samples_per_class))
-        sampled_chunks.append(chunk)
+    if max_samples < 1:
+        raise ValueError(f"max_samples must be at least 1; received {max_samples}.")
+    if df_data.empty:
+        print("Dataset is empty; no debug subsampling performed.")
+        return df_data.copy()
 
-    df_data = pd.concat(sampled_chunks, ignore_index=True)
-    df_data = df_data.sample(frac=1)
-    df_data = df_data.reset_index(drop=True)
-    
-    return df_data
+    target_size = min(max_samples, len(df_data))
+    if gt_columns is None:
+        gt_columns = [column for column in df_data.columns if column.endswith("_ground_truth")]
+    gt_columns = [column for column in gt_columns if column in df_data.columns]
+
+    # No labels: retain a random subset rather than the first N rows.
+    if not gt_columns:
+        print(f"No '*_ground_truth' columns found. Randomly sampling {target_size}/{len(df_data)} rows.")
+        return df_data.sample(n=target_size, random_state=random_state).reset_index(drop=True)
+
+    # Convert NaN, pd.NA, and None to a common hashable sentinel.
+    print(f"Building distributed debug subset using ground-truth columns: {gt_columns}")
+    missing_sentinel = "<MISSING>"
+    label_frame = df_data[gt_columns].astype(object).where(df_data[gt_columns].notna(), missing_sentinel)
+
+    # A tuple creates a multi-feature profile without assuming labels are categorical or discrete.
+    profile_series = label_frame.apply(lambda row: tuple(row.tolist()), axis=1)
+    working_df = df_data.copy()
+    working_df["_debug_label_profile"] = profile_series
+    profile_groups = [
+        group.sample(frac=1.0, random_state=random_state + group_index).index.tolist()
+        for group_index, (_, group) in enumerate(
+            working_df.groupby("_debug_label_profile", sort=False, dropna=False)
+        )
+    ]
+
+    # Shuffle profile order, independently from row order inside profiles.
+    rng = np.random.default_rng(random_state)
+    rng.shuffle(profile_groups)
+
+    # Round-robin sampling ensures broad profile coverage before repeatedly drawing from common profiles.
+    selected_indices: list[int] = []
+    while profile_groups and len(selected_indices) < target_size:
+        remaining_groups: list[list[int]] = []
+
+        for group_indices in profile_groups:
+            if len(selected_indices) >= target_size:
+                break
+
+            selected_indices.append(group_indices.pop())
+            if group_indices:
+                remaining_groups.append(group_indices)
+
+        profile_groups = remaining_groups
+
+    result = df_data.loc[selected_indices].sample(frac=1.0, random_state=random_state).reset_index(drop=True)
+    print(f"Selected distributed debug subset: {len(result)}/{len(df_data)} rows; {len(profile_groups)} profiles still had unselected rows.")
+
+    return result

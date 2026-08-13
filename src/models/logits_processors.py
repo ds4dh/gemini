@@ -1,405 +1,360 @@
+import json
 import math
-import numpy as np
-import torch
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any
-try:
-    import xgrammar as xgr
-except ImportError:
-    xgr = None
 
-try:
-    from vllm.config import VllmConfig
-    from vllm.v1.sample.logits_processor import (
-        BatchUpdate,
-        LogitsProcessor,
-        MoveDirectionality,
-    )
-except ImportError:
-    VllmConfig, BatchUpdate, MoveDirectionality = None, None, None
-    class LogitsProcessor: pass
+import numpy as np
+import torch
 from transformers import AutoTokenizer, PreTrainedTokenizer
 
+try:
+    import xgrammar as xgr
+except ImportError as exc:
+    raise ImportError(
+        "ThinkingJSONAdapterProcessor requires xgrammar."
+    ) from exc
 
-@dataclass
-class ThinkingBudgetRequestState:
+from vllm.config import VllmConfig
+from vllm.sampling_params import SamplingParams
+from vllm.v1.sample.logits_processor import AdapterLogitsProcessor
+
+
+class GenerationPhase(Enum):
+    THINKING = auto()
+    FINAL_JSON = auto()
+
+
+def _ends_with(token_ids: list[int], suffix: list[int]) -> bool:
+    return (
+        len(token_ids) >= len(suffix)
+        and token_ids[-len(suffix):] == suffix
+    )
+
+
+def _parse_bool_or_int(value: Any, default: bool = True) -> bool:
     """
-    A small helper class to store the state for each request.
+    vLLM extra_args may serialize booleans as either bool or integer 0/1.
     """
-    max_thinking_tokens: int
-    tokens_generated: int = 0
-    stopped_thinking: bool = False
-    think_end_sentence_ids: list[int] = field(default_factory=list)
+    if value is None:
+        return default
 
+    if isinstance(value, bool):
+        return value
 
-class ThinkingBudgetProcessor(LogitsProcessor):
-    """
-    A vLLM processor that enforces a gradual budget on "thinking" tokens.
-    Starting at 75% of the budget, it gradually increases the probability
-    of ending the thinking process, reaching certainty at 100% budget.
-    """
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        device: torch.device,
-        is_pin_memory: bool,
-        think_end_token = "</think>",
-        think_end_sentence = "\nEnough thinking! Time for my final answer.\n"
-    ):
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            vllm_config.model_config.tokenizer,
-            # vllm_config.model_config.model,
-            trust_remote_code=vllm_config.model_config.trust_remote_code,
-        )
-        self.think_end_token_ids = self.tokenizer.encode(think_end_token, add_special_tokens=False)
-        self.think_end_sentence_ids = self.tokenizer.encode(think_end_sentence, add_special_tokens=False)
-        self.neg_inf = float("-inf")
-        self.req_state: dict[int, ThinkingBudgetRequestState] = {}
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
 
-    def update_state(
-        self,
-        batch_update: BatchUpdate | None,
-    ) -> None:
-        """
-        Update the internal grammar state for all requests.
-        """
-        # Update request indexing only if there was a batch update
-        if batch_update:
-
-            # Remove old requests
-            for index in batch_update.removed:
-                self.req_state.pop(index, None)
-
-            # Build a new grammar from the schema string, for each added request
-            for index, params, prompt_tok_ids, output_tok_ids in batch_update.added:
-                if params and params.extra_args:
-                    self._initialize_request_state(index, params.extra_args, prompt_tok_ids, output_tok_ids)
-
-            # Align state indices from moved requests
-            for adx, bdx, directionality in batch_update.moved:
-                a_val = self.req_state.pop(adx, None)
-                b_val = self.req_state.pop(bdx, None)
-                if a_val is not None:
-                    self.req_state[bdx] = a_val
-                if directionality == MoveDirectionality.SWAP and b_val is not None:
-                    self.req_state[adx] = b_val
-
-        # Update request state for all active requests
-        for index, state in self.req_state.items():
-            self._update_request_state(index, state)
-
-    def apply(self, logits: torch.Tensor) -> torch.Tensor:
-        """
-        Apply the gradual logits modification logic for the entire batch.
-        """
-        if not self.req_state:
-            return logits
-
-        for batch_idx, state in self.req_state.items():
-            if state.stopped_thinking:
-                continue
-
-            # Already forcing the final sentence or token
-            if state.think_end_sentence_ids:
-
-                # Get the next token from the queue and force it
-                next_token_id = state.think_end_sentence_ids.pop(0)
-                logits[batch_idx, :] = self.neg_inf
-                logits[batch_idx, next_token_id] = 0.0
-
-                # If the queue is now empty, we are completely done
-                if not state.think_end_sentence_ids:
-                    state.stopped_thinking = True
-                continue
-
-            # Coming over budget and not yet forcing the sentence, starting now
-            if state.tokens_generated > state.max_thinking_tokens:
-
-                # Set up the queue of tokens to force: sentence + </think>
-                state.think_end_sentence_ids = self.think_end_sentence_ids.copy()
-                state.think_end_sentence_ids.extend(self.think_end_token_ids)
-
-                # Force the first token in the queue
-                next_token_id = state.think_end_sentence_ids.pop(0)
-                logits[batch_idx, :] = self.neg_inf
-                logits[batch_idx, next_token_id] = 0.0
-                continue
-
-            # Still thinking and under budget, increasing token count
-            state.tokens_generated += 1
-
-        return logits
-
-    def is_argmax_invariant(self) -> bool:
-        """
-        Always false, since this processor changes biases specific tokens
-        """
-        return False
-
-    def _initialize_request_state(
-        self,
-        index: int,
-        init_params: dict[str, Any],
-        prompt_tok_ids: list[int],
-        output_tok_ids: list[int],
-    ):
-        """
-        Logit-processor-specific function to initialize the state for a new request
-        """
-        max_thinking_tokens = init_params.get("max_thinking_tokens")
-        if max_thinking_tokens is not None and isinstance(max_thinking_tokens, int):
-            self.req_state[index] = ThinkingBudgetRequestState(max_thinking_tokens=max_thinking_tokens)
-
-    @staticmethod
-    def _update_request_state(
-        index: int,
-        state: ThinkingBudgetRequestState,
-    ) -> None:
-        """
-        Logit-processor-specific function to update the state for an existing request
-        """
-        pass
-
-
-class ParsingState(Enum):
-    PRE_THINK = auto()
-    POST_THINK = auto()
-    ACTIVE_JSON = auto()
+    raise TypeError(
+        "Expected a bool or integer 0/1, "
+        f"received {value!r} ({type(value).__name__})."
+    )
 
 
 @dataclass
-class JSONRequestState:
+class ThinkingJSONRequestProcessor:
     """
-    A helper class to store the JSON grammar state for each request.
+    Per-request stateful custom logits processor.
+
+    AdapterLogitsProcessor supplies this callable with the actual current
+    output_ids list at every decoding step.
     """
-    grammar: xgr.CompiledGrammar
-    matcher: xgr.GrammarMatcher
-    output_tokens_ref: list[int]
-    think_end_token_id: int
-    post_think_token_ids: list[int]
+
+    matcher: Any
+    vocab_size: int
+    compressed_vocab_size: int
+    eos_token_id: int
+    think_end_token_ids: list[int]
+    enable_thinking: bool
+    max_thinking_tokens: int | None
+    verbose_level: int = 1
+
     processed_len: int = 0
-    parsing_state: ParsingState = ParsingState.PRE_THINK
+    thinking_tokens_generated: int = 0
+    phase: GenerationPhase = GenerationPhase.THINKING
+    force_started_at: int | None = None
 
+    def __post_init__(self) -> None:
+        if not self.enable_thinking:
+            self.phase = GenerationPhase.FINAL_JSON
+            self.matcher.reset()
 
-class JSONParsingProcessor(LogitsProcessor):
-    """
-    A vLLM processor that enforces a JSON schema after thinking is complete.
-    It waits for the end of reasoning and then activates, forcing all subsequent
-    output to conform to the provided JSON schema.
-    """
-    def __init__(
+    def __call__(
         self,
-        vllm_config: VllmConfig,
-        device: torch.device,
-        is_pin_memory: bool,
-    ):
-        # Load correct tokenizer
-        self.tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(
-            vllm_config.model_config.tokenizer,
-            # vllm_config.model_config.model,
-            trust_remote_code=vllm_config.model_config.trust_remote_code,
-        )
-
-        # Create xgrammar tokenizer adapter
-        self.vocab_size = vllm_config.model_config.get_vocab_size()
-        self.xgr_tokenizer = xgr.TokenizerInfo.from_huggingface(
-            self.tokenizer,
-            vocab_size=self.vocab_size,
-            stop_token_ids=[self.tokenizer.eos_token_id]
-        )
-        self.xgr_compiler = xgr.GrammarCompiler(self.xgr_tokenizer)
-
-        # Crucial token ids, constants, and state initialization
-        self.device = device
-        self.compressed_vocab_size = math.ceil(self.vocab_size / 32)
-        self.think_end_token_id = self.tokenizer.encode("</think>", add_special_tokens=False)[0]
-        self.post_think_token_ids = [
-            self.tokenizer.encode("\n", add_special_tokens=False)[0],
-            self.tokenizer.encode("\n\n", add_special_tokens=False)[0],
-        ]
-        self.req_state: dict[int, JSONRequestState] = {}
-
-    def update_state(
-        self,
-        batch_update: BatchUpdate | None,
-    ) -> None:
+        output_ids: list[int],
+        logits: torch.Tensor,
+    ) -> torch.Tensor:
         """
-        Update the internal grammar state for all requests.
+        Called by AdapterLogitsProcessor once per decoding step.
+
+        output_ids contains all tokens already emitted for this request.
+        logits contains the next-token distribution for this request.
         """
-        # Update request indexing only if there was a batch update
-        if batch_update:
+        self._consume_new_output_tokens(output_ids)
 
-            # Remove old requests
-            for index in batch_update.removed:
-                self.req_state.pop(index, None)
+        if self.phase == GenerationPhase.THINKING:
+            forced_token_id = self._next_forced_think_end_token(output_ids)
 
-            # Build a new grammar from the schema string, for each added request
-            for index, params, prompt_tok_ids, output_tok_ids in batch_update.added:
-                if params and params.extra_args:
-                    self._initialize_request_state(index, params.extra_args, prompt_tok_ids, output_tok_ids)
+            if forced_token_id is not None:
+                self._force_single_token(logits, forced_token_id)
 
-            # Align state indices from moved requests
-            for adx, bdx, directionality in batch_update.moved:
-                a_val = self.req_state.pop(adx, None)
-                b_val = self.req_state.pop(bdx, None)
-                if a_val is not None:
-                    self.req_state[bdx] = a_val
-                if directionality == MoveDirectionality.SWAP and b_val is not None:
-                    self.req_state[adx] = b_val
-
-        # Update request state for all active requests
-        for index, state in self.req_state.items():
-            self._update_request_state(index, state)
-
-    def apply(self, logits: torch.Tensor) -> torch.Tensor:
-        """
-        Apply the JSON grammar mask to the logits.
-        """
-        # No logit modification if there are no requests being tracked
-        if not self.req_state:
             return logits
 
-        # Find all active requests (those past the </think> token)
-        batch_size = logits.shape[0]
-        active_requests = [
-            (batch_idx, state)
-            for batch_idx, state in self.req_state.items()
-            if state.parsing_state == ParsingState.ACTIVE_JSON and batch_idx < batch_size
-        ]
-
-        # If no requests are actively parsing JSON, do nothing.
-        if not active_requests:
+        # XGrammar has already accepted EOS / its configured stop token.
+        # Do not request another grammar mask after terminal state.
+        if self.matcher.is_terminated():
+            self._force_single_token(logits, self.eos_token_id)
             return logits
 
-        # Create a new 2D numpy bitmask for the batch (batch_size, compressed_vocab_size)
-        step_bitmask_np = np.full(
-            (batch_size, self.compressed_vocab_size),
-            -1,  # this means "all tokens allowed" in int32 (all 1s)
-            dtype=np.int32,
-        )
-
-        # Fill the bitmask only for the rows corresponding to active requests
-        for batch_idx, state in active_requests:
-            state.matcher.fill_next_token_bitmask(
-                step_bitmask_np,  # the 2D array to fill
-                index=batch_idx,  # the specific row to fill
-            )
-
-        # Rows for inactive requests (with -1 mask) are unaffected
-        logits_original = logits.clone()
-        bitmask_tensor = torch.tensor(step_bitmask_np, device=logits.device)
-        xgr.apply_token_bitmask_inplace(
-            logits=logits,
-            bitmask=bitmask_tensor,
-            vocab_size=self.vocab_size
-        )
-
-        # Ignore grammar for requests with all token ids rejected
-        all_masked_rows = (logits == -float("inf")).all(dim=-1)
-        if all_masked_rows.any():
-            print(
-                f"Warning: Grammar for request {batch_idx} resulted in all "
-                f"tokens being masked. Broken grammar effect disabled."
-            )
-            return logits_original
-            # logits[all_masked_rows, :] = -float("inf")
-            # logits[all_masked_rows, self.tokenizer.eos_token_id] = 0.0
-
+        self._apply_json_grammar_mask(logits)
         return logits
 
-    def is_argmax_invariant(self) -> bool:
+    def _consume_new_output_tokens(self, output_ids: list[int]) -> None:
         """
-        Always false, as this processor zeros-out logits.
+        Advance thinking or JSON state using emitted tokens not previously seen.
         """
-        return False
+        if len(output_ids) <= self.processed_len:
+            return
 
-    def _initialize_request_state(
-        self,
-        index: int,
-        init_params: dict[str, Any],
-        prompt_tok_ids: list[int],
-        output_tok_ids: list[int],
-    ) -> None:
-        """
-        Logit-processor-specific function to initialize the state for a new request
-        """
-        # Ensure the request has a JSON schema for output guiding
-        schema_str = init_params.get("json_schema")
-        if schema_str:
-            try:
+        new_tokens = output_ids[self.processed_len:]
+        self.processed_len = len(output_ids)
 
-                # Use the compiler and json to create a grammar matcher
-                compiled_grammar = self.xgr_compiler.compile_json_schema(
-                    schema_str,
-                    indent=None,
-                    separators=None,
-                    strict_mode=True,  # False,
-                )
-                matcher = xgr.GrammarMatcher(compiled_grammar)
-
-                # Create a state entry for this request
-                self.req_state[index] = JSONRequestState(
-                    grammar=compiled_grammar,
-                    matcher=matcher,
-                    output_tokens_ref=output_tok_ids,
-                    think_end_token_id=self.think_end_token_id,
-                    post_think_token_ids=self.post_think_token_ids,
-                )
-
-            except Exception as e:
-                raise ValueError(f"Could not build JSON grammar for req {index}. {e}")
-
-        else:
-            raise KeyError("No json_schema provided in vllm_xargs for output guiding.")
-
-    @staticmethod
-    def _update_request_state(
-        index: int,
-        state: JSONRequestState,
-    ) -> None:
-        """
-        Logit-processor-specific function to update the state for an existing request
-        """
-        # Check if request state has changed since last update
-        new_len = len(state.output_tokens_ref)
-        if new_len == state.processed_len:
-            return  # no new tokens were generated for this request
-
-        # Process new tokens
-        new_tokens = state.output_tokens_ref[state.processed_len:]            
         for token_id in new_tokens:
-            
-            # Erratic behaviour might be triggered in small, over-quantized models
             if token_id < 0:
                 continue
 
-            # We are in "thinking" phase: check if we hit end-of-think token
-            if state.parsing_state == ParsingState.PRE_THINK:
-                if token_id == state.think_end_token_id:
-                    state.parsing_state = ParsingState.POST_THINK  # no grammar activated yet
+            if self.phase == GenerationPhase.THINKING:
+                self._consume_thinking_token(output_ids, token_id)
 
-            # This case happens for the token_id immediately following </think>.
-            elif state.parsing_state == ParsingState.POST_THINK:  # not "if"!
+            elif self.phase == GenerationPhase.FINAL_JSON:
+                accepted = self.matcher.accept_token(token_id)
 
-                # Activate JSON parsing now, regardless of what this token is
-                state.parsing_state = ParsingState.ACTIVE_JSON
-                state.matcher.reset()
-                print(f"Request {index}: Activated JSON parsing after </think>.")
+                if not accepted and self.verbose_level > 0:
+                    print(
+                        "Warning: generated token was rejected by the "
+                        f"JSON grammar: token_id={token_id}, "
+                        f"decoded_position={self.processed_len}"
+                    )
 
-                # Logic lenient to reasoning-stop including a newline or not
-                if token_id in state.post_think_token_ids:
-                    print(f"Request {index}: Consumed optional newline.")
-                else:
-                    accepted = state.matcher.accept_token(token_id)
-                    if not accepted:
-                        print(f"Warning: Token {token_id} rejected by grammar for req {index}")
+    def _consume_thinking_token(
+        self,
+        output_ids: list[int],
+        token_id: int,
+    ) -> None:
+        """
+        Count reasoning tokens and detect a natural or forced </think>.
+        """
+        if _ends_with(output_ids[:self.processed_len], self.think_end_token_ids):
+            if self.verbose_level > 1:
+                print(
+                    "Custom processor: detected </think>; "
+                    "activating JSON grammar."
+                )
+            self.phase = GenerationPhase.FINAL_JSON
+            self.matcher.reset()
+            return
 
-            # We are already actively parsing JSON
-            elif state.parsing_state == ParsingState.ACTIVE_JSON:
-                accepted = state.matcher.accept_token(token_id)
-                if not accepted:
-                    print(f"Warning: Token {token_id} rejected by grammar for req {index}")
+        self.thinking_tokens_generated += 1
 
-        # Update the processed length
-        state.processed_len = new_len
+    def _next_forced_think_end_token(
+        self,
+        output_ids: list[int],
+    ) -> int | None:
+        """
+        Return the next </think> token to force, or None when unconstrained.
+
+        Supports both one-token and multi-token </think> representations.
+        """
+        if self.max_thinking_tokens is None:
+            return None
+
+        if self.force_started_at is None:
+            if self.thinking_tokens_generated < self.max_thinking_tokens:
+                return None
+
+            self.force_started_at = len(output_ids)
+            if self.verbose_level > 1:
+                print(
+                    "Custom processor: thinking budget reached "
+                    f"({self.max_thinking_tokens}); forcing </think>."
+                )
+
+        emitted_forced_tokens = len(output_ids) - self.force_started_at
+
+        if emitted_forced_tokens >= len(self.think_end_token_ids):
+            return None
+
+        return self.think_end_token_ids[emitted_forced_tokens]
+
+    @staticmethod
+    def _force_single_token(
+        logits: torch.Tensor,
+        token_id: int,
+    ) -> None:
+        """
+        Make token_id the only possible next sampled token.
+        """
+        original_logit = logits[token_id].item()
+        logits.fill_(float("-inf"))
+        logits[token_id] = original_logit
+
+    def _apply_json_grammar_mask(self, logits: torch.Tensor) -> None:
+        """
+        Generate and apply an XGrammar next-token mask for this request.
+        """
+        bitmask_np = np.full(
+            (1, self.compressed_vocab_size),
+            -1,
+            dtype=np.int32,
+        )
+
+        self.matcher.fill_next_token_bitmask(
+            bitmask_np,
+            index=0,
+        )
+
+        logits_2d = logits.unsqueeze(0)
+
+        xgr.apply_token_bitmask_inplace(
+            logits=logits_2d,
+            bitmask=torch.from_numpy(bitmask_np).to(logits.device),
+            vocab_size=self.vocab_size,
+        )
+
+        if torch.isneginf(logits).all() and self.verbose_level > 0:
+            print(
+                "Warning: XGrammar masked every token for a request; "
+                "permitting EOS only."
+            )
+            logits.fill_(float("-inf"))
+            logits[self.eos_token_id] = 0.0
+
+
+class ThinkingJSONAdapterProcessor(AdapterLogitsProcessor):
+    """
+    vLLM adapter for a custom combined thinking-budget and JSON-grammar
+    request-level processor.
+    """
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        is_pin_memory: bool,
+        verbose_level: int = 1,
+    ):
+        super().__init__(vllm_config, device, is_pin_memory)
+
+        self.tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(
+            vllm_config.model_config.tokenizer,
+            trust_remote_code=vllm_config.model_config.trust_remote_code,
+        )
+
+        self.vocab_size = vllm_config.model_config.get_vocab_size()
+        self.compressed_vocab_size = math.ceil(self.vocab_size / 32)
+
+        self.eos_token_id = self.tokenizer.eos_token_id
+        if not isinstance(self.eos_token_id, int):
+            raise TypeError(
+                "Expected tokenizer.eos_token_id to be a single integer; "
+                f"received {self.eos_token_id!r}."
+            )
+
+        self.think_end_token_ids = self.tokenizer.encode(
+            "</think>",
+            add_special_tokens=False,
+        )
+        if not self.think_end_token_ids:
+            raise ValueError("Tokenizer cannot encode '</think>'.")
+
+        self.xgr_tokenizer = xgr.TokenizerInfo.from_huggingface(
+            self.tokenizer,
+            vocab_size=self.vocab_size,
+            stop_token_ids=[self.eos_token_id],
+        )
+        self.xgr_compiler = xgr.GrammarCompiler(self.xgr_tokenizer)
+
+        self.verbose_level = verbose_level
+        if self.verbose_level > 0:
+            print(
+                "ThinkingJSONAdapterProcessor initialized: "
+                f"vocab_size={self.vocab_size}, "
+                f"think_end_token_ids={self.think_end_token_ids}"
+            )
+
+    def new_req_logits_processor(
+        self,
+        params: SamplingParams,
+    ) -> ThinkingJSONRequestProcessor | None:
+        """
+        Create one isolated request-level processor from vLLM request metadata.
+        """
+        extra_args = params.extra_args or {}
+
+        schema = extra_args.get("json_schema")
+        if schema is None:
+            return None
+
+        if isinstance(schema, dict):
+            schema = json.dumps(schema)
+
+        if not isinstance(schema, str):
+            raise TypeError(
+                "json_schema must be a JSON string or dict; "
+                f"received {type(schema).__name__}."
+            )
+
+        enable_thinking = _parse_bool_or_int(
+            extra_args.get("enable_thinking", True),
+            default=True,
+        )
+
+        max_thinking_tokens = extra_args.get("max_thinking_tokens")
+
+        if max_thinking_tokens is not None:
+            if (
+                not isinstance(max_thinking_tokens, int)
+                or max_thinking_tokens < 0
+            ):
+                raise TypeError(
+                    "max_thinking_tokens must be a non-negative integer "
+                    f"or None; received {max_thinking_tokens!r}."
+                )
+
+            if not enable_thinking:
+                raise ValueError(
+                    "max_thinking_tokens was supplied while "
+                    "enable_thinking=False."
+                )
+
+        try:
+            grammar = self.xgr_compiler.compile_json_schema(
+                schema,
+                indent=None,
+                separators=None,
+                strict_mode=True,
+            )
+        except Exception as exc:
+            raise ValueError(
+                f"Could not compile JSON Schema with XGrammar: {exc}"
+            ) from exc
+
+        if self.verbose_level > 2:
+            print(
+                "Creating custom per-request processor: "
+                f"enable_thinking={enable_thinking}, "
+                f"max_thinking_tokens={max_thinking_tokens}"
+            )
+
+        return ThinkingJSONRequestProcessor(
+            matcher=xgr.GrammarMatcher(grammar),
+            vocab_size=self.vocab_size,
+            compressed_vocab_size=self.compressed_vocab_size,
+            eos_token_id=self.eos_token_id,
+            think_end_token_ids=self.think_end_token_ids,
+            enable_thinking=enable_thinking,
+            max_thinking_tokens=max_thinking_tokens,
+        )
+
+    def is_argmax_invariant(self) -> bool:
+        return False

@@ -36,16 +36,37 @@ def _infer_vllm(
     output_schema_model: Type[BaseModel] | None = None,
     enable_thinking: bool = True,
     max_thinking_tokens: int | None = None,
-    *args, **kwargs,
+    use_output_guide: bool = False,
+    *args,
+    **kwargs,
 ) -> list[list[str]]:
     """
     Runs inference with vLLM directly (faster than querying vLLM-serve)
     """
     # Define if structured output is used or not during inference
     structured_params = None
-    if output_schema_model is not None:
+    if use_output_guide:
+        
+        if output_schema_model is None:
+            raise ValueError(
+                "use_output_guide=True requires a resolved Pydantic output schema."
+            )
+            
+        if max_thinking_tokens is not None:
+            raise ValueError(
+                "Direct vllm uses native structured output and cannot use the "
+                "custom post-</think> thinking-budget/JSON-processor path. "
+                "Use inference_backend='vllm-serve' instead."
+            )
+
         json_schema = output_schema_model.model_json_schema()
         structured_params = StructuredOutputsParams(json=json_schema)
+
+    print(
+        "Direct vLLM output-guidance configuration: "
+        f"use_output_guide={use_output_guide}, "
+        f"native_structured_output={structured_params is not None}"
+    )
 
     # Define thinking budget if required
     extra_args = {}
@@ -104,22 +125,36 @@ def _setup_inference_output(
     use_output_guide: bool = True,
 ) -> tuple[dict | None, dict]:
     """
-    Define how output is influenced during inference
+    Define server-side request arguments.
+
+    JSON guidance is implemented by JSONParsingProcessor. It receives both
+    the schema and whether this request is expected to contain </think>.
     """
-    extra_body = {}
-    if enable_thinking == False:
-        extra_body = {"chat_template_kwargs": {"enable_thinking": enable_thinking}}
+    extra_body: dict[str, Any] = {
+        "chat_template_kwargs": {
+            "enable_thinking": bool(enable_thinking),
+        }
+    }
+
+    vllm_xargs: dict[str, Any] = {}
     
-    vllm_xargs = {}
     if max_thinking_tokens is not None:
+        if not enable_thinking:
+            raise ValueError(
+                "max_thinking_tokens requires enable_thinking=True."
+            )
         vllm_xargs["max_thinking_tokens"] = max_thinking_tokens
-        
-    # Only attach json_schema if use_output_guide is True
-    if use_output_guide and output_schema_model is not None:
-        schema_dict = output_schema_model.model_json_schema()
-        schema_str = json.dumps(schema_dict)
-        safe_schema_str = schema_str.replace("'", "\\u0027")
-        vllm_xargs["json_schema"] = safe_schema_str
+
+    if use_output_guide:
+        if output_schema_model is None:
+            raise ValueError(
+                "use_output_guide=True requires a resolved output schema."
+            )
+
+        vllm_xargs["json_schema"] = json.dumps(
+            output_schema_model.model_json_schema()
+        )
+        vllm_xargs["enable_thinking"] = enable_thinking
 
     if vllm_xargs:
         extra_body["vllm_xargs"] = vllm_xargs
@@ -137,7 +172,9 @@ def _infer_vllm_serve(
     output_schema_model: Type[BaseModel] | None = None,
     enable_thinking: bool = True,
     max_thinking_tokens: int | None = None,
-    *args, **kwargs,
+    use_output_guide: bool = False,
+    *args,
+    **kwargs,
 ) -> list[list[str]]:
     """
     Runs inference by querying the vLLM server using the chat completion API
@@ -145,7 +182,12 @@ def _infer_vllm_serve(
     # Initialization
     client = model
     model_name = client.models.list().data[0].id
-    response_format, extra_body = _setup_inference_output(output_schema_model, enable_thinking, max_thinking_tokens)
+    response_format, extra_body = _setup_inference_output(
+        output_schema_model=output_schema_model,
+        enable_thinking=enable_thinking,
+        max_thinking_tokens=max_thinking_tokens,
+        use_output_guide=use_output_guide,
+    )
 
     @retry(
         wait=wait_exponential(multiplier=1, min=1, max=16),
@@ -186,8 +228,10 @@ async def _infer_vllm_serve_async(
     output_schema_model: Type[BaseModel] | None = None,
     enable_thinking: bool = True,
     max_thinking_tokens: int | None = None,
+    use_output_guide: bool = False,
     max_concurrent_requests: int = 64,
-    *args, **kwargs,
+    *args,
+    **kwargs,
 ) -> list[list[str]]:
     """
     Runs inference by querying the vLLM server asynchronously
@@ -196,7 +240,12 @@ async def _infer_vllm_serve_async(
     client = AsyncOpenAI(base_url=str(model.base_url), api_key=model.api_key, timeout=model.timeout)  # client = model
     model_name = (await client.models.list()).data[0].id
     semaphore = asyncio.Semaphore(max_concurrent_requests)  # to avoid overload
-    response_format, extra_body = _setup_inference_output(output_schema_model, enable_thinking, max_thinking_tokens)
+    response_format, extra_body = _setup_inference_output(
+        output_schema_model=output_schema_model,
+        enable_thinking=enable_thinking,
+        max_thinking_tokens=max_thinking_tokens,
+        use_output_guide=use_output_guide,
+    )
     max_context_length = kwargs.get("max_context_length") or 20_000
     safe_prompt_length = max(1, max_context_length - max_new_tokens - 100)
     extra_body["truncate_prompt_tokens"] = safe_prompt_length

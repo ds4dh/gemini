@@ -199,8 +199,7 @@ def normalize_pipeline_config(raw_cfg: dict) -> dict:
             "use_curated_dataset": cfg.get("use_curated_dataset", False),
             "add_curated_dataset": cfg.get("add_curated_dataset", False),
             "remove_samples_without_label": cfg.get("remove_samples_without_label", False),
-            "sample_small_dataset": cfg.get("sample_small_dataset", False),
-            "min_samples_per_class": cfg.get("min_samples_per_class", 15),
+            "max_samples": cfg.get("max_samples", None),
         }
 
     # Defaults for essential fields
@@ -388,4 +387,9 @@ def set_distributed_environment():
         print(f"Automatically detected primary network interface: '{interface_name}' with IP: {primary_ip}")
         os.environ['GLOO_SOCKET_IFNAME'] = interface_name
         os.environ['NCCL_SOCKET_IFNAME'] = interface_name
+        
+        # Add IPv4 force flags to prevent IPv6/hostname fallback errors
+        os.environ['TP_SOCKET_IFNAME'] = interface_name
+        os.environ['GLOO_FORCE_IPV4'] = '1'
+        os.environ['NCCL_IB_DISABLE'] = '1'  # Disable InfiniBand if using standard Ethernet
         print(f"Successfully set GLOO_SOCKET_IFNAME and NCCL_SOCKET_IFNAME to '{interface_name}'")

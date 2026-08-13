@@ -42,7 +42,7 @@ def extract_structured_output(
         validated_output = output_schema_model.model_validate_json(raw_output.strip())
         # print("Success: Direct parsing successful.")
         return validated_output.model_dump()
-    except (ValidationError, json.JSONDecodeError):
+    except Exception:
         pass
 
     # Isolate JSON block (from markdown or first/last braces)
@@ -73,7 +73,7 @@ def extract_structured_output(
         validated_output = output_schema_model.model_validate_json(json_candidate)
         print("Success: Isolated and parsed JSON block.")
         return validated_output.model_dump()
-    except (ValidationError, json.JSONDecodeError):
+    except Exception:
         pass
 
     # Parse with lenient json5 library
@@ -82,7 +82,7 @@ def extract_structured_output(
         validated_output = output_schema_model.model_validate(data)
         print("Success: Parsed with lenient json5 library.")
         return validated_output.model_dump()
-    except (ValidationError, Exception):
+    except Exception:
         pass
 
     # Attempt to repair truncated JSON
@@ -91,16 +91,19 @@ def extract_structured_output(
         validated_output = output_schema_model.model_validate_json(repaired_json)
         print("Success: Repaired truncated JSON and parsed.")
         return validated_output.model_dump()
-    except (ValidationError, json.JSONDecodeError):
+    except Exception:
         pass
 
     # Field-by-field regex extraction
     print("Warning: All parsing methods failed. Attempting field-by-field regex extraction.")
     extracted_data = {}
-    for field_name, field_info in output_schema_model.model_fields.items():
-        value = _extract_field_with_regex(json_candidate, field_name, field_info.annotation)
-        if value is not None:
-            extracted_data[field_name] = value
+    try:
+        for field_name, field_info in output_schema_model.model_fields.items():
+            value = _extract_field_with_regex(json_candidate, field_name, field_info.annotation)
+            if value is not None:
+                extracted_data[field_name] = value
+    except Exception as e:
+        print(f"Warning: Exception during regex extraction: {e}")
 
     if not extracted_data:
         print("Error: Could not extract any fields with regex. Returning default values.")
@@ -113,7 +116,8 @@ def extract_structured_output(
     try:
         final_model = output_schema_model.model_validate(defaults)
         return final_model.model_dump()
-    except ValidationError:
+    except Exception as e:
+        print(f"Warning: Error during final output field validation: {e}")
         return defaults
 
 

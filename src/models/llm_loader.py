@@ -30,6 +30,33 @@ except ImportError:
 
 from src.utils.run_utils import extract_quant_method
 
+THINKING_JSON_ADAPTER_PROCESSOR = (
+    "src.models.logits_processors:ThinkingJSONAdapterProcessor"
+)
+
+
+def select_server_logits_processors(
+    *,
+    use_output_guide: bool,
+    max_thinking_tokens: int | None,
+) -> list[str]:
+    """
+    Select custom vLLM server logits processors.
+    ThinkingJSONAdapterProcessor owns both:
+    - the custom thinking-budget mechanism; and
+    - custom XGrammar JSON-schema constrained decoding.
+    """
+    if use_output_guide:
+        return [THINKING_JSON_ADAPTER_PROCESSOR]
+
+    if max_thinking_tokens is not None:
+        raise ValueError(
+            "max_thinking_tokens requires use_output_guide=True because "
+            "ThinkingJSONAdapterProcessor owns the thinking-budget logic."
+        )
+
+    return []
+
 
 def _detect_hf_config_quant_method(model_path: str) -> str | None:
     """
@@ -126,6 +153,8 @@ def _load_model_vllm_server(
     quant_scheme: str | None = None,
     reasoning_parser: str | None = None,
     logits_processors: list[str] | None = None,
+    use_output_guide: bool = False,
+    max_thinking_tokens: int | None = None,
     max_context_length: int | None = None,
     max_concurrent_inferences: int | None = None,
     num_gpus_to_use: int = 1,
@@ -135,82 +164,172 @@ def _load_model_vllm_server(
     max_batched_tokens: int = 32768,
     host: str = "localhost",
     port: int | None = None,
-    client_timeout: int | float = 43200,  # 7200
+    client_timeout: int | float = 43200,
     async_mode: bool = False,
-    *args, **kwargs,
+    *args,
+    **kwargs,
 ) -> tuple[OpenAI | AsyncOpenAI, subprocess.Popen]:
     """
-    Launches a vLLM OpenAI-compatible server as a background process,
-    allowing its output to stream to the terminal, and returns a client
-    and the server process handle.
+    Start a vLLM OpenAI-compatible server.
+
+    For guided requests, exactly one custom processor is registered:
+    ThinkingJSONAdapterProcessor.
+
+    That adapter owns both custom behaviors:
+    1. Force </think> when max_thinking_tokens is reached.
+    2. Apply the XGrammar JSON-schema token mask after thinking completes.
     """
-    tokenizer_name = get_tokenizer_name(model_path)
-    
-    # Special case for GGUF models: download locally and force eager mode
     if quant_method == "gguf":
-        enforce_eager = True  # solves unnecessary torch compile crashes on GGUF
-        model_path = download_gguf_by_quant(model_path, quant_scheme)
+        raise ValueError(
+            "The vLLM server backend does not support GGUF in this pipeline. "
+            "Use inference_backend='llama-cpp' for GGUF models."
+        )
+
+    if max_thinking_tokens is not None:
+        if (
+            not isinstance(max_thinking_tokens, int)
+            or max_thinking_tokens < 0
+        ):
+            raise ValueError(
+                "max_thinking_tokens must be a non-negative integer or null; "
+                f"received {max_thinking_tokens!r}."
+            )
+
+    tokenizer_name = get_tokenizer_name(model_path)
+    if not tokenizer_name:
+        raise ValueError(
+            f"Could not determine a tokenizer for model {model_path!r}. "
+            "Provide a model repository with base_model metadata or update "
+            "get_tokenizer_name()."
+        )
 
     config_quant = _detect_hf_config_quant_method(model_path)
     vllm_quant = None if config_quant else quant_method
 
-    # Build the server command declaratively
-    cmd = [sys.executable, "-m", "vllm.entrypoints.openai.api_server"]
-    if port is None: 
+    selected_processors = select_server_logits_processors(
+        use_output_guide=use_output_guide,
+        max_thinking_tokens=max_thinking_tokens,
+    )
+
+    # The YAML list is validated, not used as the source of truth.
+    # Runtime selection must remain deterministic and must never register
+    # both the old and the adapter processors at the same time.
+    if logits_processors is not None:
+        requested_processors = set(logits_processors)
+        allowed_processors = {THINKING_JSON_ADAPTER_PROCESSOR}
+
+        unsupported_processors = requested_processors - allowed_processors
+        if unsupported_processors:
+            raise ValueError(
+                "Unsupported custom logits processor(s) configured: "
+                f"{sorted(unsupported_processors)}.\n"
+                "Use only:\n"
+                f"  - {THINKING_JSON_ADAPTER_PROCESSOR}"
+            )
+
+        expected_processors = set(selected_processors)
+
+        if requested_processors != expected_processors:
+            raise ValueError(
+                "Configured logits_processors does not match the required "
+                "runtime processor selection.\n"
+                f"Configured: {sorted(requested_processors)}\n"
+                f"Required:   {sorted(expected_processors)}\n"
+                "For use_output_guide=true, configure exactly "
+                "ThinkingJSONAdapterProcessor. For false, configure no "
+                "custom processors."
+            )
+
+    if use_output_guide and selected_processors != [
+        THINKING_JSON_ADAPTER_PROCESSOR
+    ]:
+        raise RuntimeError(
+            "Invariant failure: guided server requests must register exactly "
+            "ThinkingJSONAdapterProcessor."
+        )
+
+    if not use_output_guide and selected_processors:
+        raise RuntimeError(
+            "Invariant failure: processors selected while "
+            "use_output_guide=False."
+        )
+
+    print(
+        "vLLM server custom-guidance configuration: "
+        f"use_output_guide={use_output_guide}, "
+        f"max_thinking_tokens={max_thinking_tokens}, "
+        f"logits_processors={selected_processors or 'none'}"
+    )
+
+    if port is None:
         port = find_free_port()
 
+    cmd = [
+        sys.executable,
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+    ]
+
     params = {
-        # Server configuration
         "--host": host,
         "--port": port,
         "--model": model_path,
         "--tokenizer": tokenizer_name,
         "--tensor-parallel-size": num_gpus_to_use,
         "--reasoning-parser": reasoning_parser,
-        "--logits-processors": logits_processors,
-
-        # Memory and batching
+        "--logits-processors": selected_processors or None,
         "--gpu-memory-utilization": gpu_memory_utilization,
         "--max-num-seqs": max_concurrent_inferences,
+        "--max-num-batched-tokens": max_batched_tokens,
         "--max-model-len": max_context_length,
-
-        # Performance
         "--dtype": "auto",
         "--quantization": vllm_quant,
         "--enforce-eager": enforce_eager,
     }
 
-    # Convert parameters to command-line arguments
     for key, value in params.items():
         if value is None or value is False:
             continue
+
         cmd.append(key)
+
         if isinstance(value, bool):
-            continue  # for True booleans, only key is added (e.g. --enforce-eager)
+            continue
+
         if isinstance(value, (list, tuple)):
-            cmd.extend([str(v) for v in value])
+            cmd.extend(str(item) for item in value)
         else:
             cmd.append(str(value))
 
-    # Launch the server and wait for it to be ready
     base_url = f"http://{host}:{port}"
+
+    print("Launching vLLM command:")
+    print(" ".join(cmd))
+
     server_process = subprocess.Popen(cmd)
     print(f"\nStarting vLLM server at {base_url}")
+
     try:
         wait_for_vllm_server_ready(server_process, base_url)
-
-    # Ensure the process is terminated if the server fails to start
-    except (RuntimeError, TimeoutError) as e:
+    except (RuntimeError, TimeoutError):
         server_process.terminate()
         server_process.wait()
-        raise e
+        raise
 
-    # Choose the appropriate client (sync or async)
-    print("\nvLLM server is running. Client is being configured.")
+    client_base_url = f"{base_url}/v1"
+
     if async_mode:
-        client = AsyncOpenAI(base_url=f"{base_url}/v1", api_key="vllm", timeout=client_timeout)
+        client = AsyncOpenAI(
+            base_url=client_base_url,
+            api_key="vllm",
+            timeout=client_timeout,
+        )
     else:
-        client = OpenAI(base_url=f"{base_url}/v1", api_key="vllm", timeout=client_timeout)
+        client = OpenAI(
+            base_url=client_base_url,
+            api_key="vllm",
+            timeout=client_timeout,
+        )
 
     return client, server_process
 
@@ -249,39 +368,58 @@ def _load_model_llama_cpp(
 def load_model(
     model_path: str,
     inference_backend: str,
-    quant_scheme: str|None = None,
-    reasoning_parser: str|None = None,
-    logits_processors: list[str]|None = None,
-    max_context_length: int|None = None,
-    max_concurrent_inferences: int|None = None,
+    quant_scheme: str | None = None,
+    reasoning_parser: str | None = None,
+    logits_processors: list[str] | None = None,
+    use_output_guide: bool = False,
+    max_thinking_tokens: int | None = None,
+    max_context_length: int | None = None,
+    max_concurrent_inferences: int | None = None,
     use_flash_attention: bool = False,
-    num_gpus_to_use: int|None = None,
+    num_gpus_to_use: int | None = None,
     gpu_memory_utilization: float = 0.9,
     enforce_eager: bool = True,
-    *args, **kwargs,
+    *args,
+    **kwargs,
 ) -> tuple[Any, subprocess.Popen | None]:
     """
-    Create an LLM-based inference generator for solving a task
+    Create the requested inference backend with one unambiguous
+    structured-output mechanism.
     """
     model_path = model_path.strip().strip("'").strip('"').rstrip("\\").rstrip("/")
-    # Determine number of GPUs to use
+
     if num_gpus_to_use is None:
         num_gpus_to_use = torch.cuda.device_count()
-        print(f"Selected all available GPUs by default ({num_gpus_to_use})")    
+        print(f"Selected all available GPUs by default ({num_gpus_to_use})")
+
     max_num_gpus = torch.cuda.device_count()
     if num_gpus_to_use > max_num_gpus:
-        print("Warning: selected number of GPUs larger than what is available")
-        print(f"Will try to load the model on {max_num_gpus} GPUs")
+        print("Warning: selected number of GPUs exceeds available GPUs.")
         num_gpus_to_use = max_num_gpus
 
-    # Define arguments for the model loaders
+    if inference_backend == "vllm" and max_thinking_tokens is not None:
+        raise ValueError(
+            "max_thinking_tokens requires vllm-serve or vllm-serve-async. "
+            "The direct vllm backend does not register custom "
+            "ThinkingBudgetProcessor instances."
+        )
+
+    if inference_backend == "vllm" and logits_processors:
+        print(
+            "Note: direct vllm uses native StructuredOutputsParams only; "
+            "configured custom logits processors are intentionally ignored."
+        )
+
     quant_method = extract_quant_method(model_path)
+
     load_args = {
         "model_path": model_path,
         "quant_scheme": quant_scheme,
         "quant_method": quant_method,
         "reasoning_parser": reasoning_parser,
         "logits_processors": logits_processors,
+        "use_output_guide": use_output_guide,
+        "max_thinking_tokens": max_thinking_tokens,
         "max_concurrent_inferences": max_concurrent_inferences,
         "max_context_length": max_context_length,
         "num_gpus_to_use": num_gpus_to_use,
@@ -290,26 +428,37 @@ def load_model(
         "enforce_eager": enforce_eager,
     }
 
-    # Load model and tokenizer
     server_process = None
+
     match inference_backend:
-        case "vllm": model = _load_model_vllm(**load_args)
-        case "vllm-serve": model, server_process = _load_model_vllm_server(**load_args)
-        case "vllm-serve-async": model, server_process = _load_model_vllm_server(async_mode=True, **load_args)
-        case "llama-cpp": model = _load_model_llama_cpp(**load_args)
-        case "mock": model = _load_model_mock(**load_args)
-        case _: raise ValueError(f"Unknown inference backend: {inference_backend}")
+        case "vllm":
+            model = _load_model_vllm(**load_args)
+
+        case "vllm-serve":
+            model, server_process = _load_model_vllm_server(**load_args)
+
+        case "vllm-serve-async":
+            model, server_process = _load_model_vllm_server(
+                async_mode=True,
+                **load_args,
+            )
+
+        case "llama-cpp":
+            model = _load_model_llama_cpp(**load_args)
+
+        case "mock":
+            model = _load_model_mock(**load_args)
+
+        case _:
+            raise ValueError(f"Unknown inference backend: {inference_backend}")
 
     return model, server_process
-
-
 
 
 def _load_model_mock(*args, **kwargs):
     """Load mock model for fast offline testing."""
     print("Mock inference backend initialized.")
     return ("mock_model", None)
-
 
 
 def get_tokenizer_name(
@@ -350,20 +499,6 @@ def get_tokenizer_name(
             return default_tokenizer_name
 
     return tokenizer_name
-
-
-# def download_gguf_by_quant(model_id: str, quant_scheme: str) -> str:
-#     """
-#     Download the first matching GGUF file in a model repository
-#     """
-#     quant_scheme_lower = quant_scheme.lower()
-#     files = list_repo_files(model_id)
-#     for file in files:
-#         file_lower = file.lower()
-#         if file_lower.endswith(".gguf") and quant_scheme_lower in file_lower:
-#             return hf_hub_download(repo_id=model_id, filename=file)
-        
-#     raise FileNotFoundError(f"No GGUF file found with quantization scheme '{quant_scheme}' in repo '{model_id}'")
 
 
 def download_gguf_by_quant(model_id: str, quant_scheme: str) -> str:

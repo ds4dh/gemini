@@ -1,8 +1,9 @@
 import os
 import gc
-import pandas as pd
+import signal
 import argparse
 import subprocess
+import pandas as pd
 from typing import Any
 from functools import partial
 
@@ -162,35 +163,40 @@ def record_one_benchmark(
     finally:
         print("Cleaning up resources...")
 
-        # Terminate server process if it was started
+        # Terminate server process gracefully if it was started
         if server_process is not None and server_process.poll() is None:
-            print("Terminating vLLM server...")
-            server_process.terminate()  # send a polite SIGTERM signal
+            print("Shutting down vLLM server gracefully...")
             
-            # Wait for a graceful shutdown
+            # Send SIGINT (Interrupt / Ctrl+C) to trigger Uvicorn/vLLM graceful shutdown
+            server_process.send_signal(signal.SIGINT)
+
+            # Allow vLLM time to cleanly finalize HTTP routes and EngineCore loops
             try:
-                server_process.wait(timeout=30)
-                print("Server terminated gracefully.")
-            
-            # Force killing the process with SIGKILL
+                server_process.wait(timeout=15)
+                print("Server shut down cleanly.")
             except subprocess.TimeoutExpired:
-                print("Server did not terminate within 30 seconds, killing it.")
-                server_process.kill()
-                server_process.wait()  # wait for the OS to clean up the killed process
-                print("Server killed.")
+                print("Server did not shut down in time, terminating...")
+                server_process.terminate()
+                try:
+                    server_process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    server_process.kill()
+                    server_process.wait()
 
         # Clean GPU memory and distributed processes if any
         if "model" in locals() and cfg.get('inference_backend') != 'vllm-serve':
             del model
-        if torch_dist.is_initialized(): torch_dist.destroy_process_group()
+        if torch_dist.is_initialized(): 
+            torch_dist.destroy_process_group()
+            
         torch.cuda.empty_cache()
         gc.collect()
         print_gpu_info()
         print("Cleaned memory")
 
         # Clean model cache
-        if cfg["delete_model_cache_after_run"]:
-            clean_model_cache(cfg["model_path"], cfg["quant_scheme"])
+        if cfg.get("delete_model_cache_after_run"):
+            clean_model_cache(cfg["model_path"], cfg.get("quant_scheme"))
 
 
 def benchmark_one_model(

@@ -1,25 +1,36 @@
-# ==============================================================================
+# ================================================================================
 # GEMINI CLINICAL TEXT EXTRACTION PIPELINE - RUN CONFIGURATION
-# ==============================================================================
+# ================================================================================
 # Configure model selection, inference backend, dataset input paths,
 # generation hyperparameters, and output paths.
-# ==============================================================================
+# ================================================================================
 
-# ------------------------------------------------------------------------------
-# 1. DATASET INPUT & PREPROCESSING
-# ------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------
+# DATASET INPUT AND PREPROCESSING
+# --------------------------------------------------------------------------------
 data:
   # input_path: "data/synthetic_clinical_notes.csv"
   input_path: "data/data_2024/processed/dataset.csv"
   input_text_column: "input_text"
   id_column: "patient_id"
-  sample_small_dataset: false
-  min_samples_per_class: 15
+  max_samples: null
   remove_samples_without_label: false
 
-# ------------------------------------------------------------------------------
-# 2. MODEL & INFERENCE BACKEND
-# ------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------
+# OUTPUT PATHS AND SAVING
+# --------------------------------------------------------------------------------
+output:
+  result_dir: "./results"
+  use_timestamp_subfolder: true
+  detailed_filename: "detailed_clinical_database.csv"
+  summary_filename: "summary_clinical_database.csv"
+  report_filename: "extraction_report.json"
+  save_chunk_size: 10
+  resume_previous_run: false
+
+# --------------------------------------------------------------------------------
+# MODEL AND INFERENCE BACKEND
+# --------------------------------------------------------------------------------
 model:
   # Model path or HuggingFace ID
   # model_path: "Qwen/Qwen2.5-0.5B-Instruct"
@@ -34,36 +45,23 @@ model:
   # - "llama-cpp" (GGUF llama.cpp)
   # - "mock" (Instant dummy offline testing)
   inference_backend: "vllm-serve-async"
-  n_inference_repeats: 10
   quant_scheme: null  # used only if "gguf" in model_path.lower()
+  n_inference_repeats: 10
+  max_concurrent_inferences: 32  # only used if backend == vllm-serve-async
+  delete_model_cache_after_run: false
+  enforce_eager: true  # if true, trades efficiency for lower GPU memory usage (no CUDA graph caching)
+  num_gpus_to_use: null
+  gpu_memory_utilization: 0.90  # this gives more space for vLLM, but avoid too close to 1.0
 
   # Logits processors and output guiding
   enable_thinking: true
+  max_thinking_tokens: 1024  # handled by ThinkingBudgetProcessor
   use_output_guide: true  # set to true when you want guided JSON
-  max_thinking_tokens: 512  # handled by ThinkingBudgetProcessor
-  logits_processors:  # register custom vLLM Logit Processors for vLLM server:
-    - "src.models.logits_processors:ThinkingBudgetProcessor"
-    - "src.models.logits_processors:JSONParsingProcessor"
+  logits_processors:
+    - "src.models.logits_processors:ThinkingJSONAdapterProcessor"
 
   # Generation hyperparameters
   temperature: 0.1
   top_p: 0.9
-  max_new_tokens: 512
-  max_context_length: 4096
-  num_gpus_to_use: null
-  enforce_eager: true  # if true, lowers GPU memory usage (no CUDA graph caching)
-  gpu_memory_utilization: 0.88  # this gives more space for vLLM, but avoid too close to 1.0
-  max_concurrent_inferences: 32  # only used if backend == vllm-serve-async
-  delete_model_cache_after_run: false
-
-# ------------------------------------------------------------------------------
-# 3. OUTPUT PATHS & SAVING
-# ------------------------------------------------------------------------------
-output:
-  result_dir: "./results"
-  use_timestamp_subfolder: true
-  detailed_filename: "detailed_clinical_database.csv"
-  summary_filename: "summary_clinical_database.csv"
-  report_filename: "extraction_report.json"
-  save_chunk_size: 10
-  resume_previous_run: false
+  max_new_tokens: 1536  # should be greater than "max_thinking_tokens" (if used)
+  max_context_length: 8192
