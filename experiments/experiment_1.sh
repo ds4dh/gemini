@@ -4,11 +4,12 @@
 PARTITION="shared-gpu"
 TIME_TO_RUN="0-11:55:00"
 NUM_GPUS=1
-CONFIG_FILE="./config.yaml"
+RUN_CONFIG="configs/run_cfg.yaml"
+EXTRACTION_CONFIG="configs/extraction_cfgs/mrs_score.yaml"
 INFERENCE_BACKEND="vllm-serve-async"
 
-if [ ! -f "$CONFIG_FILE" ]; then
-    echo "Error: Configuration file not found at '$CONFIG_FILE'"
+if [ ! -f "$RUN_CONFIG" ]; then
+    echo "Error: Configuration file not found at '$RUN_CONFIG'"
     exit 1
 fi
 
@@ -81,7 +82,8 @@ for MODEL_PATH in "${MODEL_PATHS[@]}"; do
             -m "$MEM_TO_USE" \
             -t "$TIME_TO_RUN" \
             -n "$NODE_LIST_TO_USE" \
-            -c "$CONFIG_FILE" \
+            -rc "$RUN_CONFIG" \
+            -ec "$EXTRACTION_CONFIG" \
             --model "$MODEL_PATH" \
             --quant-scheme "$QUANT_SCHEME" \
             --backend "$INFERENCE_BACKEND" \

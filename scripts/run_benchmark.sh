@@ -6,7 +6,8 @@ TIME="0-00:15:00"
 GPUS_PER_TASK=1
 MEM="128G"
 NODE_LIST="gpu034,gpu035"
-CONFIG_FILE="./config.yaml"
+RUN_CONFIG="configs/run_cfg.yaml"
+EXTRACTION_CONFIG="configs/extraction_cfgs/mrs_score.yaml"
 MODEL_PATH="Qwen/Qwen2.5-0.5B-Instruct"
 QUANT_SCHEME="none"
 INFERENCE_BACKEND="vllm-serve-async"
@@ -22,6 +23,8 @@ while [[ $# -gt 0 ]]; do
         -g|--gpus-per-task) GPUS_PER_TASK="$2"; shift 2 ;;
         -m|--mem) MEM="$2"; shift 2 ;;
         -n|--nodelist) NODE_LIST="$2"; shift 2 ;;
+        -rc|--run-config) RUN_CONFIG="$2"; shift 2 ;;
+        -ec|--extraction-config) EXTRACTION_CONFIG="$2"; shift 2 ;;
         -c|--config) CONFIG_FILE="$2"; shift 2 ;;
         --model) MODEL_PATH="$2"; shift 2 ;;
         --quant-scheme) QUANT_SCHEME="$2"; shift 2 ;;
@@ -78,8 +81,9 @@ sbatch <<EOF
 #SBATCH --error=./results/logs/job_%j.err
 
 echo "Starting job \$SLURM_JOB_ID on \$(hostname)..."
-srun apptainer exec --nv "${SIF_IMAGE}" python run_pipeline.py \\
-    --config "${CONFIG_FILE}" \\
+srun apptainer exec --nv "${SIF_IMAGE}" python scripts/run_pipeline.py \\
+    --run-config "${RUN_CONFIG}" \\
+    --extraction-config "${EXTRACTION_CONFIG}" \\
     --model "${MODEL_PATH}" \\
     --quant-scheme "${QUANT_SCHEME}" \\
     --backend "${INFERENCE_BACKEND}" \\

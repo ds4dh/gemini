@@ -1,0 +1,88 @@
+# ================================================================================
+# GEMINI CLINICAL TEXT EXTRACTION PIPELINE - MULTI-VARIABLE EXTRACTION CONFIG
+# ================================================================================
+# Target extraction schema and prompt templates for multi-variable clinical extraction
+# (mRS score, smoking status, aneurysm size in mm).
+# ================================================================================
+
+# --------------------------------------------------------------------------------
+# TARGET EXTRACTION SCHEMA
+# --------------------------------------------------------------------------------
+schema:
+  name: "MultiVariableClinicalExtractionSchema"
+  fields:
+    mRS:
+      type: "int"
+      description: >
+        Modified Rankin Scale score:
+        0=No symptoms,
+        1=No significant disability,
+        2=Slight disability,
+        3=Moderate disability,
+        4=Moderately severe disability,
+        5=Severe disability,
+        6=Dead.
+        Use null when the score cannot be inferred.
+      ge: 0
+      le: 6
+      default: null
+
+    smoking_status:
+      type: "enum"
+      description: "Patient smoking habit classification"
+      enum_values: ["Smoker", "Non-smoker", "Former-smoker", "Unknown"]
+      default: "Unknown"
+
+    aneurysm_size_mm:
+      type: "float"
+      description: "Maximum diameter of intracranial aneurysm in millimeters if present, else null"
+      default: null
+
+# --------------------------------------------------------------------------------
+# PROMPT TEMPLATES & TASK CONTEXT
+# --------------------------------------------------------------------------------
+prompt:
+  system_template: |
+    {task_description}
+    {domain_knowledge}
+    {output_specifications}
+  
+  user_template: |
+    Voici le texte d'entrée:
+    DEBUT DU TEXTE:
+    {input_text}
+    FIN DU TEXTE
+
+  context_data:
+    task_description: |
+      Tu es un expert médical et neuro-chirurgien. Ta tâche est d’analyser le texte médical clinique et d'en déduire les variables cliniques (mRS score, statut tabagique, taille d'anévrisme en mm).
+    domain_knowledge: |
+      Règles d'évaluation et de déduction clinique :
+
+      1. mRS (Échelle de Rankin Modifiée) - Déduis le score d'après la description fonctionnelle ou l'issue du patient, même si le sigle "mRS" n'est pas écrit explicitement :
+         - 6 (Décédé) : Tout décès du patient, arrêt cardiorespiratoire irréversible, évolution fatale ou constat de décès.
+         - 5 (Incapacité sévère) : Patient alité en permanence, tétraparétique, incontinent/sondé ou dépendant 24h/24 des soignants.
+         - 4 (Incapacité modérément sévère) : Incapable de marcher sans aide physique d'un tiers, besoin d'aide pour l'habillage/toilette.
+         - 3 (Incapacité modérée) : Marche seul sans aide physique, mais a besoin d'aide pour les courses, ménage lourd ou démarches.
+         - 2 (Incapacité légère) : Autonomie complète pour tous les actes quotidiens (toilette, repas, logement), mais incapable de reprendre toutes ses activités antérieures (travail, sport intense).
+         - 1 (Incapacité non significative) : Autonome, symptômes mineurs n'entraînant aucune restriction des activités usuelles.
+         - 0 (Aucun symptôme) : Récupération ad integrum, aucun symptôme ni gêne.
+         - null (Inconnu) : Uniquement si le score mRS ne peut pas être déduit.
+
+      2. Statut tabagique (smoking_status) :
+         - "Smoker" : Fumeur actif (cigarettes, cigares, paquets-années, tabac à rouler).
+         - "Former-smoker" : Ancien fumeur ayant définitivement arrêté (sevrage tabagique réussi).
+         - "Non-smoker" : Jamais fumé, absence de facteur de risque tabagique.
+         - "Unknown" : Information absente ou non renseignée.
+
+      3. Taille d'anévrisme en millimètres (aneurysm_size_mm) :
+         - Diamètre maximal de l'anévrisme intracrânien converti en millimètres (mm). Si la taille est exprimée en cm (ex: 1.2 cm, 0.45 cm), convertis-la obligatoirement en mm (ex: 12.0, 4.5).
+         - Retourne null si aucun anévrisme n'est décelé ou si l'imagerie est normale.
+    output_specifications: |
+      Raisonne uniquement à l'intérieur des balises <think> et </think>.
+      La réponse finale doit être un objet JSON strict sans texte additionnel, avec le format suivant:
+      {
+        "mRS": <nombre entier entre 0 et 6 ou null>,
+        "smoking_status": "<Smoker | Non-smoker | Former-smoker | Unknown>",
+        "aneurysm_size_mm": <nombre décimal ou null>
+      }

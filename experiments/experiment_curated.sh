@@ -2,7 +2,7 @@
 
 # Configuration & Paths
 RUN_CONFIG="configs/run_cfg.yaml"
-EXTRACTION_CONFIG="configs/extraction_cfg.yaml"
+EXTRACTION_CONFIG="configs/extraction_cfgs/mrs_score.yaml"
 CURATED_DATA_PATH="data/synthetic_clinical_notes.csv"  # or /data/final/20260302_Letters_Combined.csv
 INFERENCE_BACKEND="vllm"                              # or vllm-serve-async / llama-cpp
 GPU_MEM_UTIL="0.80"
@@ -34,8 +34,9 @@ for MODEL_PATH in "${MODEL_PATHS[@]}"; do
         echo "--------------------------------------------------------"
 
         # Execute run_pipeline with dynamic CLI parameters (no sed YAML hacking!)
-        python run_pipeline.py \
-            --config "$CONFIG_FILE" \
+        python scripts/run_pipeline.py \
+            --run-config "$RUN_CONFIG" \
+            --extraction-config "$EXTRACTION_CONFIG" \
             --input-path "$CURATED_DATA_PATH" \
             --model "$MODEL_PATH" \
             --quant-scheme "$QUANT_SCHEME" \

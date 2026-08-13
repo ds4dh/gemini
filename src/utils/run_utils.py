@@ -19,21 +19,21 @@ def add_model_arguments(parser: ArgumentParser) -> None:
     )
 
     model_group.add_argument(
-        "-c", "--config", "--config-path",
-        default="config.yaml",
-        help="Path to the primary unified configuration file (default: config.yaml)"
+        "-rc", "--run-config",
+        default="configs/run_cfg.yaml",
+        help="Path to the primary run configuration file (default: configs/run_cfg.yaml)"
     )
 
     model_group.add_argument(
-        "-mc", "--model-config-path",
+        "-ec", "--extraction-config",
         default=None,
-        help="Legacy model config path (optional)"
+        help="Path to the specific extraction configuration file (optional override)"
     )
 
     model_group.add_argument(
-        "-pc", "--prompt-config-path",
+        "-c", "--config",
         default=None,
-        help="Legacy prompt config path (optional)"
+        help="Path to unified single configuration file (optional override)"
     )
 
 
@@ -42,14 +42,8 @@ def add_data_arguments(parser: ArgumentParser) -> None:
     Add arguments required for dataset access.
     """
     data_group = parser.add_argument_group(
-        title="Data access and remote env configuration",
+        title="Data access configuration",
         description="Arguments for local/remote dataset access and encryption."
-    )
-
-    data_group.add_argument(
-        "-dc", "--data-config-path",
-        default=None,
-        help="Legacy data config path (optional)"
     )
 
     data_group.add_argument(
@@ -73,38 +67,7 @@ def add_data_arguments(parser: ArgumentParser) -> None:
         "-kn",
         type=str,
         default="GEMINI",
-        help="Name of the encryption key variable in the .env file on the remote server.",
-    )
-
-    data_group.add_argument(
-        "--hostname",
-        "-hn",
-        type=str,
-        default="host.name.is.required.com",
-        help="Hostname or IP address of the remote server.",
-    )
-
-    data_group.add_argument(
-        "--username",
-        "-un",
-        type=str,
-        default="username_is_required",
-        help="Username for the SSH connection.",
-    )
-
-    data_group.add_argument(
-        "--remote-env-path",
-        "-re",
-        type=str,
-        default="/home/username/project/required/env/path/.env",
-        help="Path to the .env file on the remote server.",
-    )
-
-    data_group.add_argument(
-        "--port",
-        type=int,
-        default=22,
-        help="SSH port on the remote server (default: 22).",
+        help="Name of the encryption key variable in the .env file.",
     )
 
 
@@ -123,8 +86,12 @@ def _load_config_from_yaml(config_file_path: str) -> dict:
 
 
 def load_config_files(script_args) -> dict:
-    """ Load configurations from split YAML files (configs/run_cfg.yaml & configs/extraction_cfg.yaml)
-        or fallback single unified YAML file specified in script_args.
+    """ Load configurations from split YAML files:
+        1. Run configuration (default: configs/run_cfg.yaml or script_args.run_config).
+        2. Extraction configuration (specified by script_args.extraction_config CLI argument,
+           or 'extraction_config_path' inside run_cfg.yaml,
+           defaulting to configs/extraction_cfgs/extraction_cfg.yaml).
+        Fallback to single unified YAML file if specified via script_args.config.
     """
     # Check if an explicit single unified config file path is provided via --config
     single_config_path = getattr(script_args, "config", None) or getattr(script_args, "config_path", None)
@@ -134,19 +101,36 @@ def load_config_files(script_args) -> dict:
         raw_cfg = _load_config_from_yaml(single_config_path)
         return normalize_pipeline_config(raw_cfg)
 
-    # Load split configurations: run_cfg.yaml and extraction_cfg.yaml
+    # 1. Determine and load run configuration
     run_config_path = getattr(script_args, "run_config", None) or getattr(script_args, "run_config_path", None) or "configs/run_cfg.yaml"
-    extraction_config_path = getattr(script_args, "extraction_config", None) or getattr(script_args, "extraction_config_path", None) or "configs/extraction_cfg.yaml"
-
     run_cfg = _load_config_from_yaml(run_config_path) if os.path.exists(run_config_path) else {}
-    extraction_cfg = _load_config_from_yaml(extraction_config_path) if os.path.exists(extraction_config_path) else {}
-
-    if run_config_path and os.path.exists(run_config_path):
+    if os.path.exists(run_config_path):
         print(f"Loading run configuration from: {run_config_path}")
-    if extraction_config_path and os.path.exists(extraction_config_path):
+    else:
+        print(f"Warning: Run configuration file not found at: {run_config_path}")
+
+    # 2. Determine and load extraction configuration
+    # CLI arg overrides run_cfg setting (under data: or top-level), which overrides default path
+    cli_extraction_path = getattr(script_args, "extraction_config", None) or getattr(script_args, "extraction_config_path", None)
+    if cli_extraction_path:
+        extraction_config_path = cli_extraction_path
+    elif run_cfg.get("data", {}).get("extraction_config_path"):
+        extraction_config_path = run_cfg["data"]["extraction_config_path"]
+    elif "extraction_config_path" in run_cfg:
+        extraction_config_path = run_cfg["extraction_config_path"]
+    else:
+        extraction_config_path = "configs/extraction_cfgs/mrs_score.yaml"
+
+    extraction_cfg = _load_config_from_yaml(extraction_config_path) if os.path.exists(extraction_config_path) else {}
+    if os.path.exists(extraction_config_path):
         print(f"Loading extraction configuration from: {extraction_config_path}")
+    else:
+        print(f"Warning: Extraction configuration file not found at: {extraction_config_path}")
 
     merged_cfg = {**run_cfg, **extraction_cfg}
+    merged_cfg["_active_run_config_path"] = run_config_path
+    merged_cfg["_active_extraction_config_path"] = extraction_config_path
+
     return normalize_pipeline_config(merged_cfg)
 
 

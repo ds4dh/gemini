@@ -27,7 +27,7 @@ def main() -> None:
     """
     set_distributed_environment()
 
-    # Load configuration from unified or split YAML files
+    # Load configuration from YAML files or CLI options
     args = parse_cli_args()
     cfg = load_config_files(args)
 
@@ -51,10 +51,14 @@ def main() -> None:
     if args.save_chunk_size:
         cfg["save_chunk_size"] = args.save_chunk_size
 
+    active_rc = cfg.get("_active_run_config_path", args.run_config)
+    active_ec = cfg.get("_active_extraction_config_path", args.extraction_config or "configs/extraction_cfgs/mrs_score.yaml")
+
     print("================================================================")
     print(" GEMINI CLINICAL VARIABLE EXTRACTION PIPELINE")
     print("================================================================")
-    print(f"Config path:       {args.config}")
+    print(f"Run Config:        {active_rc}")
+    print(f"Extraction Config: {active_ec}")
     print(f"Model:             {cfg['model_path']}")
     print(f"Inference Backend: {cfg['inference_backend']}")
     print(f"Input Data Path:   {cfg.get('input_path', 'default')}")
@@ -104,8 +108,8 @@ def parse_cli_args() -> argparse.Namespace:
     parser.add_argument(
         "--extraction-config", "-ec",
         type=str,
-        default="configs/extraction_cfg.yaml",
-        help="Path to extraction configuration YAML file (default: configs/extraction_cfg.yaml)",
+        default=None,
+        help="Path to extraction configuration YAML file (overrides extraction_config_path in run_cfg.yaml)",
     )
     parser.add_argument(
         "--config", "-c",
@@ -210,12 +214,12 @@ def run_model(
     try:
         rc_dest = os.path.join(run_dir, "run_cfg.yaml")
         ec_dest = os.path.join(run_dir, "extraction_cfg.yaml")
-        rc_src = getattr(args, "run_config", "configs/run_cfg.yaml")
-        ec_src = getattr(args, "extraction_config", "configs/extraction_cfg.yaml")
+        rc_src = cfg.get("_active_run_config_path", getattr(args, "run_config", "configs/run_cfg.yaml"))
+        ec_src = cfg.get("_active_extraction_config_path", getattr(args, "extraction_config", "configs/extraction_cfgs/mrs_score.yaml"))
 
-        if os.path.exists(rc_src):
+        if rc_src and os.path.exists(rc_src):
             shutil.copyfile(rc_src, rc_dest)
-        if os.path.exists(ec_src):
+        if ec_src and os.path.exists(ec_src):
             shutil.copyfile(ec_src, ec_dest)
         if args.config and os.path.exists(args.config):
             shutil.copyfile(args.config, os.path.join(run_dir, "config.yaml"))

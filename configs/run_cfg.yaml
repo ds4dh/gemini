@@ -9,6 +9,7 @@
 # DATASET INPUT AND PREPROCESSING
 # --------------------------------------------------------------------------------
 data:
+  extraction_config_path: "configs/extraction_cfgs/mrs_score.yaml"
   # input_path: "data/synthetic_clinical_notes.csv"
   input_path: "data/data_2024/processed/dataset.csv"
   input_text_column: "input_text"

@@ -6,7 +6,7 @@
 
 ## Features
 
-- **Modular Configuration (`configs/`)**: Manage model execution parameters (`configs/run_cfg.yaml`) and target extraction schemas & prompts (`configs/extraction_cfg.yaml`) cleanly from separate files.
+- **Modular Configuration (`configs/`)**: Manage model execution parameters (`configs/run_cfg.yaml`) and target extraction schemas & prompts (`configs/extraction_cfgs/*.yaml`) cleanly from separate files.
 - **Dynamic Schema Engine**: Automatically generates Pydantic validation schemas at runtime based on field specifications (e.g., Modified Rankin Scale score `mRS`, `smoking_status`, `aneurysm_size_mm`, or custom clinical parameters).
 - **Multi-Backend Inference**:
   - `vllm` / `vllm-serve-async`: High-throughput GPU inference engine for desktop and HPC environments.
@@ -68,36 +68,47 @@ sbatch research-env.sbatch
 
 ## Usage Guide
 
-### 1. Pipeline Execution (`run_pipeline.py`)
+### 1. Pipeline Execution (`scripts/run_pipeline.py`)
 
 Run the pipeline using the configuration files in `configs/`:
 
 #### Offline Test Run (Mock Backend)
 ```bash
-python run_pipeline.py --backend mock
+python scripts/run_pipeline.py --backend mock
 ```
 
 #### High-Throughput GPU Inference (vLLM Backend)
 ```bash
-python run_pipeline.py --run-config configs/run_cfg.yaml --extraction-config configs/extraction_cfg.yaml
+# Uses default run_cfg.yaml and extraction config path specified inside run_cfg.yaml (under data section)
+python scripts/run_pipeline.py
+
+# Or specify custom run and extraction configs via CLI
+python scripts/run_pipeline.py --run-config configs/run_cfg.yaml --extraction-config configs/extraction_cfgs/clinical_variables.yaml
 ```
 
 ---
 
 ### 2. Target Variable Configuration
 
-Target clinical fields are defined under `schema.fields` in `configs/extraction_cfg.yaml`:
+Default run configurations are located in `configs/run_cfg.yaml`. The path to the default extraction configuration is specified under the `data` section in `run_cfg.yaml`:
+
+```yaml
+data:
+  extraction_config_path: "configs/extraction_cfgs/mrs_score.yaml"
+```
+
+Target clinical fields are defined under `schema.fields` in extraction YAML files located in `configs/extraction_cfgs/` (such as `mrs_score.yaml` or `clinical_variables.yaml`):
 
 ```yaml
 schema:
-  name: "ClinicalVariablesExtractionSchema"
+  name: "MultiVariableClinicalExtractionSchema"
   fields:
     mRS:
       type: "int"
-      description: "Modified Rankin Scale score (0 to 6, or -1 if unmentioned)"
-      ge: -1
+      description: "Modified Rankin Scale score (0 to 6, or null if unmentioned)"
+      ge: 0
       le: 6
-      default: -1
+      default: null
 
     smoking_status:
       type: "enum"
@@ -115,13 +126,13 @@ schema:
 
 ### 3. Dynamic CLI Overrides
 
-Override configuration parameters via command-line arguments without modifying `config.yaml`:
+Override configuration parameters via command-line arguments without modifying YAML files:
 
 ```bash
-python run_pipeline.py \
-    --config config.yaml \
-    --model "unsloth/Qwen3-8B-GGUF" \
-    --quant-scheme "Q6_K_XL" \
+python scripts/run_pipeline.py \
+    --run-config configs/run_cfg.yaml \
+    --extraction-config configs/extraction_cfgs/clinical_variables.yaml \
+    --model "cyankiwi/Qwen3.6-27B-AWQ-INT4" \
     --backend "vllm-serve-async" \
     --gpu-memory-utilization 0.90 \
     --input-path "data/synthetic_clinical_notes.csv" \
@@ -159,17 +170,23 @@ Outputs `data/synthetic_clinical_notes.csv`.
 ```
 gemini/
 ├── configs/
-│   ├── run_cfg.yaml           # Model, dataset, backend, and output paths
-│   └── extraction_cfg.yaml    # Target clinical schema and prompt templates
-├── run_pipeline.py            # Primary CLI entrypoint script
-├── pyproject.toml             # Project dependencies and packaging metadata
-├── data/                      # Input datasets and synthetic clinical notes
+│   ├── run_cfg.yaml                   # Model, dataset, backend, and output paths
+│   └── extraction_cfgs/
+│       ├── mrs_score.yaml             # Single-variable mRS score extraction schema & prompt
+│       └── clinical_variables.yaml    # Multi-variable (mRS, smoking, aneurysm) schema & prompt
+├── pyproject.toml                     # Project dependencies and packaging metadata
+├── data/                              # Input datasets and synthetic clinical notes
 │   └── synthetic_clinical_notes.csv
-├── results/                   # Output extracted CSV databases
+├── results/                           # Output extracted CSV databases
 ├── src/
-│   ├── data/                  # Schema engine, prompting, data loading
-│   ├── models/                # LLM loaders and inference backends
-│   └── utils/                 # Environment and configuration utilities
-├── scripts/                   # Utility scripts (synthetic data, benchmarking)
-└── experiments/               # Experiment execution scripts
+│   ├── data/                          # Schema engine, prompting, data loading
+│   ├── models/                        # LLM loaders and inference backends
+│   └── utils/                         # Environment and configuration utilities
+├── scripts/
+│   ├── run_pipeline.py                # Primary CLI entrypoint script
+│   ├── generate_synthetic_data.py     # Synthetic dataset generator
+│   ├── create_dataset.py              # Dataset formatting and encryption script
+│   ├── plot_figures.py                # Benchmark figures plotting script
+│   └── run_benchmark.sh               # Slurm submission runner script
+└── experiments/                       # Experiment execution scripts
 ```
