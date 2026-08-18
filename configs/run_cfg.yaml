@@ -1,16 +1,17 @@
-# ================================================================================
+# --------------------------------------------------------------------------------
 # GEMINI CLINICAL TEXT EXTRACTION PIPELINE - RUN CONFIGURATION
-# ================================================================================
+# --------------------------------------------------------------------------------
 # Configure model selection, inference backend, dataset input paths,
 # generation hyperparameters, and output paths.
-# ================================================================================
+# --------------------------------------------------------------------------------
 
 # --------------------------------------------------------------------------------
 # DATASET INPUT AND PREPROCESSING
 # --------------------------------------------------------------------------------
 data:
-  extraction_config_path: "configs/extraction_cfgs/mrs_score.yaml"
+  # extraction_config_path: "configs/extraction_cfgs/clinical_variables.yaml"
   # input_path: "data/synthetic_clinical_notes.csv"
+  extraction_config_path: "configs/extraction_cfgs/mrs_score.yaml"
   input_path: "data/data_2024/processed/dataset.csv"
   input_text_column: "input_text"
   id_column: "patient_id"
@@ -26,8 +27,8 @@ output:
   detailed_filename: "detailed_clinical_database.csv"
   summary_filename: "summary_clinical_database.csv"
   report_filename: "extraction_report.json"
-  save_chunk_size: 100
-  resume_previous_run: false
+  save_chunk_size: 100  # each how many samples a result checkpoint is saved
+  resume_previous_run: false  # looks for detailed_filename (latest one if use_timestamp_subfolder = true)
 
 # --------------------------------------------------------------------------------
 # MODEL AND INFERENCE BACKEND
@@ -38,7 +39,8 @@ model:
   # model_path: "Qwen/Qwen3-0.6B"
   # model_path: "Qwen/Qwen3.5-0.8B"
   # model_path: "cyankiwi/Qwen3.5-4B-AWQ-4bit"
-  model_path: "cyankiwi/Qwen3.6-27B-AWQ-INT4"
+  # model_path: "cyankiwi/Qwen3.6-27B-AWQ-INT4"
+  model_path: "unsloth/Qwen3.8-27B-NVFP4"
   quant_scheme: null  # used only if "gguf" in model_path.lower()
 
   # Inference backend options:
@@ -47,8 +49,11 @@ model:
   # - "llama-cpp" (GGUF llama.cpp)
   # - "mock" (Instant dummy offline testing)
   inference_backend: "vllm-serve-async"
-  n_inference_repeats: 10
-  max_concurrent_inferences: 32  # only used if backend == vllm-serve-async
+  n_inference_repeats: 10  # if n_inference_repeats is constant, then nir * mcr = mci
+  max_concurrent_requests: 3  # local asyncio client concurrency limit
+  max_concurrent_inferences: 30  # vLLM server scheduler capacity: becomes --max-num-seqs
+
+  # Model memory management
   num_gpus_to_use: null
   gpu_memory_utilization: 0.90  # this gives more space for vLLM, but avoid too close to 1.0
   delete_model_cache_after_run: false
@@ -62,7 +67,11 @@ model:
     - "src.models.logits_processors:ThinkingJSONAdapterProcessor"
 
   # Generation hyperparameters
-  temperature: 0.1
-  top_p: 0.9
-  max_new_tokens: 1536  # should be greater than "max_thinking_tokens" (if used)
-  max_context_length: 8192
+  temperature: 1.0  # 0.1
+  top_p: 0.95  # 0.9
+  top_k: 20
+  min_p: 0.0
+  presence_penalty: 0.0
+  repetition_penalty: 1.0
+  max_new_tokens: 1200  # should be greater than "max_thinking_tokens" (if used)
+  max_context_length: 5000

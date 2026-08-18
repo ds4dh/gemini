@@ -3,7 +3,7 @@ import json
 import math
 import time
 from functools import partial
-from typing import Any, Optional, Type
+from typing import Any, Type
 
 from datasets import Dataset
 from pydantic import BaseModel
@@ -11,17 +11,9 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 from tqdm import tqdm
 from tqdm.asyncio import tqdm_asyncio
 
-try:
-    from vllm import LLM, RequestOutput, SamplingParams
-    from vllm.sampling_params import StructuredOutputsParams
-except ImportError:
-    LLM, SamplingParams, RequestOutput, StructuredOutputsParams = None, None, None, None
-
-try:
-    from openai import AsyncOpenAI, InternalServerError, OpenAI
-except ImportError:
-    OpenAI, AsyncOpenAI, InternalServerError = None, None, Exception
-
+from vllm import LLM, RequestOutput, SamplingParams
+from vllm.sampling_params import StructuredOutputsParams
+from openai import AsyncOpenAI, InternalServerError, OpenAI
 from src.data.output_guiding import extract_structured_output, resolve_schema_model
 from src.data.prompting import build_prompt
 
@@ -33,34 +25,34 @@ def _infer_vllm(
     max_new_tokens: int,
     temperature: float = 1.0,
     top_p: float = 1.0,
+    top_k: int = 0,
+    min_p: float = 0.0,
+    presence_penalty: float = 0.0,
+    repetition_penalty: float = 1.0,
     output_schema_model: Type[BaseModel] | None = None,
     enable_thinking: bool = True,
     max_thinking_tokens: int | None = None,
     use_output_guide: bool = False,
-    *args,
-    **kwargs,
+    *args: Any,
+    **kwargs: Any,
 ) -> list[list[str]]:
-    """
-    Runs inference with vLLM directly (faster than querying vLLM-serve)
-    """
-    # Define if structured output is used or not during inference
+    """Run direct vLLM inference with optional native JSON guidance."""
+    if max_thinking_tokens is not None:
+        raise ValueError(
+            "max_thinking_tokens is supported only with "
+            "inference_backend='vllm-serve' or 'vllm-serve-async'. "
+            "Direct vLLM does not register ThinkingJSONAdapterProcessor."
+        )
+
     structured_params = None
     if use_output_guide:
-        
         if output_schema_model is None:
             raise ValueError(
                 "use_output_guide=True requires a resolved Pydantic output schema."
             )
-            
-        if max_thinking_tokens is not None:
-            raise ValueError(
-                "Direct vllm uses native structured output and cannot use the "
-                "custom post-</think> thinking-budget/JSON-processor path. "
-                "Use inference_backend='vllm-serve' instead."
-            )
-
-        json_schema = output_schema_model.model_json_schema()
-        structured_params = StructuredOutputsParams(json=json_schema)
+        structured_params = StructuredOutputsParams(
+            json=output_schema_model.model_json_schema()
+        )
 
     print(
         "Direct vLLM output-guidance configuration: "
@@ -68,22 +60,18 @@ def _infer_vllm(
         f"native_structured_output={structured_params is not None}"
     )
 
-    # Define thinking budget if required
-    extra_args = {}
-    if max_thinking_tokens is not None:
-        extra_args["max_thinking_tokens"] = max_thinking_tokens
-
-    # Build sampling parameters
     sampling_params = SamplingParams(
-        n=n_inference_repeats,  # several completions per prompt
+        n=n_inference_repeats,
         max_tokens=max_new_tokens,
         temperature=temperature,
         top_p=top_p,
+        top_k=top_k,
+        min_p=min_p,
+        presence_penalty=presence_penalty,
+        repetition_penalty=repetition_penalty,
         structured_outputs=structured_params,
-        extra_args=extra_args if extra_args else None,
     )
 
-    # Build prompts using model tokenizer by mapping dataset messages
     tokenizer_fn = partial(
         build_prompt,
         tokenizer=model.get_tokenizer(),
@@ -92,29 +80,23 @@ def _infer_vllm(
     )
     dataset = dataset.map(tokenizer_fn, desc="Building prompts for vLLM")
 
-    # Run vLLM model on all dataset's prompts (single, efficient batch call)
-    outputs: list[RequestOutput] = model.generate(dataset["prompt"], sampling_params=sampling_params)
-    
-    # Each request_output in outputs corresponds to a prompt and contains n completions
-    output_texts = [
+    outputs: list[RequestOutput] = model.generate(
+        dataset["prompt"],
+        sampling_params=sampling_params,
+    )
+    return [
         [completion.text.strip() for completion in request_output.outputs]
         for request_output in outputs
     ]
 
-    return output_texts
 
-
-def _extract_outputs_vllm(choices: list) -> list[str]:
-    """
-    Extract content from chat completion choices, falling back to reasoning content
-    """
+def _extract_outputs_vllm(choices: list[Any]) -> list[str]:
+    """Extract final content, falling back to reasoning content when needed."""
     outputs = []
     for choice in choices:
         content = getattr(choice.message, "content", None)
         reasoning_content = getattr(choice.message, "reasoning_content", None)
-        if content is None: content = reasoning_content
-        outputs.append((content or "").strip())
-
+        outputs.append((content if content is not None else reasoning_content or "").strip())
     return outputs
 
 
@@ -123,26 +105,23 @@ def _setup_inference_output(
     enable_thinking: bool = True,
     max_thinking_tokens: int | None = None,
     use_output_guide: bool = True,
-) -> tuple[dict | None, dict]:
-    """
-    Define server-side request arguments.
+) -> tuple[None, dict[str, Any]]:
+    """Build server request options for ThinkingJSONAdapterProcessor.
 
-    JSON guidance is implemented by JSONParsingProcessor. It receives both
-    the schema and whether this request is expected to contain </think>.
+    The server-side adapter receives request-specific JSON-schema and bounded-
+    thinking settings through ``vllm_xargs``. The chat template receives the
+    model-level thinking toggle through ``chat_template_kwargs``.
     """
     extra_body: dict[str, Any] = {
         "chat_template_kwargs": {
             "enable_thinking": bool(enable_thinking),
         }
     }
-
     vllm_xargs: dict[str, Any] = {}
-    
+
     if max_thinking_tokens is not None:
         if not enable_thinking:
-            raise ValueError(
-                "max_thinking_tokens requires enable_thinking=True."
-            )
+            raise ValueError("max_thinking_tokens requires enable_thinking=True.")
         vllm_xargs["max_thinking_tokens"] = max_thinking_tokens
 
     if use_output_guide:
@@ -150,7 +129,6 @@ def _setup_inference_output(
             raise ValueError(
                 "use_output_guide=True requires a resolved output schema."
             )
-
         vllm_xargs["json_schema"] = json.dumps(
             output_schema_model.model_json_schema()
         )
@@ -162,6 +140,33 @@ def _setup_inference_output(
     return None, extra_body
 
 
+def _server_extra_body(
+    base_extra_body: dict[str, Any],
+    top_k: int,
+    min_p: float,
+    repetition_penalty: float,
+    max_context_length: int | None = None,
+    max_new_tokens: int | None = None,
+) -> dict[str, Any]:
+    """Add vLLM-specific request sampling options without mutating shared input."""
+    extra_body = dict(base_extra_body)
+    extra_body.update(
+        {
+            "top_k": top_k,
+            "min_p": min_p,
+            "repetition_penalty": repetition_penalty,
+        }
+    )
+
+    if max_context_length is not None and max_new_tokens is not None:
+        extra_body["truncate_prompt_tokens"] = max(
+            1,
+            max_context_length - max_new_tokens - 100,
+        )
+
+    return extra_body
+
+
 def _infer_vllm_serve(
     model: OpenAI,
     dataset: Dataset,
@@ -169,34 +174,42 @@ def _infer_vllm_serve(
     max_new_tokens: int,
     temperature: float = 1.0,
     top_p: float = 1.0,
+    top_k: int = 0,
+    min_p: float = 0.0,
+    presence_penalty: float = 0.0,
+    repetition_penalty: float = 1.0,
     output_schema_model: Type[BaseModel] | None = None,
     enable_thinking: bool = True,
     max_thinking_tokens: int | None = None,
     use_output_guide: bool = False,
-    *args,
-    **kwargs,
+    *args: Any,
+    **kwargs: Any,
 ) -> list[list[str]]:
-    """
-    Runs inference by querying the vLLM server using the chat completion API
-    """
-    # Initialization
+    """Run synchronous inference through the vLLM chat-completions server."""
     client = model
     model_name = client.models.list().data[0].id
-    response_format, extra_body = _setup_inference_output(
+    response_format, base_extra_body = _setup_inference_output(
         output_schema_model=output_schema_model,
         enable_thinking=enable_thinking,
         max_thinking_tokens=max_thinking_tokens,
         use_output_guide=use_output_guide,
     )
+    extra_body = _server_extra_body(
+        base_extra_body=base_extra_body,
+        top_k=top_k,
+        min_p=min_p,
+        repetition_penalty=repetition_penalty,
+        max_context_length=kwargs.get("max_context_length"),
+        max_new_tokens=max_new_tokens,
+    )
 
     @retry(
         wait=wait_exponential(multiplier=1, min=1, max=16),
-        stop=stop_after_attempt(max_attempt_number=5),
+        stop=stop_after_attempt(5),
         retry=retry_if_exception_type((InternalServerError, ConnectionError)),
         reraise=True,
     )
-    def generate_vllm_outputs(messages: list[dict[str, str]]):
-        """Single-shot API call function"""
+    def generate_vllm_outputs(messages: list[dict[str, str]]) -> list[str]:
         chat_completion = client.chat.completions.create(
             model=model_name,
             messages=messages,
@@ -204,16 +217,16 @@ def _infer_vllm_serve(
             n=n_inference_repeats,
             temperature=temperature,
             top_p=top_p,
+            presence_penalty=presence_penalty,
             response_format=response_format,
             extra_body=extra_body,
         )
         return _extract_outputs_vllm(chat_completion.choices)
 
-    # Query the server for each task separately
     all_outputs = []
     for messages in tqdm(dataset["messages"], desc="Querying vLLM server"):
         all_outputs.append(generate_vllm_outputs(messages))
-        time.sleep(1)  # avoid overwhelming the server (useful?)
+        time.sleep(1)
 
     return all_outputs
 
@@ -225,98 +238,136 @@ async def _infer_vllm_serve_async(
     max_new_tokens: int,
     temperature: float = 1.0,
     top_p: float = 1.0,
+    top_k: int = 0,
+    min_p: float = 0.0,
+    presence_penalty: float = 0.0,
+    repetition_penalty: float = 1.0,
     output_schema_model: Type[BaseModel] | None = None,
     enable_thinking: bool = True,
     max_thinking_tokens: int | None = None,
     use_output_guide: bool = False,
     max_concurrent_requests: int = 64,
-    *args,
-    **kwargs,
+    *args: Any,
+    **kwargs: Any,
 ) -> list[list[str]]:
-    """
-    Runs inference by querying the vLLM server asynchronously
-    """
-    # Re-initialize the client inside the current event loop to prevent 'Event loop is closed' errors
-    client = AsyncOpenAI(base_url=str(model.base_url), api_key=model.api_key, timeout=model.timeout)  # client = model
-    model_name = (await client.models.list()).data[0].id
-    semaphore = asyncio.Semaphore(max_concurrent_requests)  # to avoid overload
-    response_format, extra_body = _setup_inference_output(
-        output_schema_model=output_schema_model,
-        enable_thinking=enable_thinking,
-        max_thinking_tokens=max_thinking_tokens,
-        use_output_guide=use_output_guide,
+    """Run bounded-concurrency inference through the vLLM chat server."""
+    client = AsyncOpenAI(
+        base_url=str(model.base_url),
+        api_key=model.api_key,
+        timeout=model.timeout,
     )
-    max_context_length = kwargs.get("max_context_length") or 20_000
-    safe_prompt_length = max(1, max_context_length - max_new_tokens - 100)
-    extra_body["truncate_prompt_tokens"] = safe_prompt_length
 
-    @retry(
-        wait=wait_exponential(multiplier=1, min=1, max=16),
-        stop=stop_after_attempt(5),
-        retry=retry_if_exception_type((InternalServerError, ConnectionError)),
-        reraise=True,
-    )
-    async def generate_vllm_outputs(messages: list[dict[str, str]]):
-        """Single-shot async API call function, with semaphore control"""
-        async with semaphore:
-            chat_completion = await client.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                max_tokens=max_new_tokens,
-                n=n_inference_repeats,
-                temperature=temperature,
-                top_p=top_p,
-                response_format=response_format,
-                extra_body=extra_body,
-            )
+    try:
+        model_name = (await client.models.list()).data[0].id
+        semaphore = asyncio.Semaphore(max_concurrent_requests)
+        response_format, base_extra_body = _setup_inference_output(
+            output_schema_model=output_schema_model,
+            enable_thinking=enable_thinking,
+            max_thinking_tokens=max_thinking_tokens,
+            use_output_guide=use_output_guide,
+        )
+        extra_body = _server_extra_body(
+            base_extra_body=base_extra_body,
+            top_k=top_k,
+            min_p=min_p,
+            repetition_penalty=repetition_penalty,
+            max_context_length=kwargs.get("max_context_length"),
+            max_new_tokens=max_new_tokens,
+        )
+
+        @retry(
+            wait=wait_exponential(multiplier=1, min=1, max=16),
+            stop=stop_after_attempt(5),
+            retry=retry_if_exception_type((InternalServerError, ConnectionError)),
+            reraise=True,
+        )
+        async def generate_vllm_outputs(
+            messages: list[dict[str, str]],
+        ) -> list[str]:
+            async with semaphore:
+                chat_completion = await client.chat.completions.create(
+                    model=model_name,
+                    messages=messages,
+                    max_tokens=max_new_tokens,
+                    n=n_inference_repeats,
+                    temperature=temperature,
+                    top_p=top_p,
+                    presence_penalty=presence_penalty,
+                    response_format=response_format,
+                    extra_body=extra_body,
+                )
             return _extract_outputs_vllm(chat_completion.choices)
 
-    # Query the server for all tasks concurrently
-    tasks = [generate_vllm_outputs(messages) for messages in dataset["messages"]]
-    all_outputs = await tqdm_asyncio.gather(*tasks, desc="Querying vLLM server (async)")
-    
-    return all_outputs
+        tasks = [
+            generate_vllm_outputs(messages)
+            for messages in dataset["messages"]
+        ]
+        return await tqdm_asyncio.gather(
+            *tasks,
+            desc="Querying vLLM server (async)",
+        )
+    finally:
+        await client.close()
 
 
 def _infer_llama_cpp(
-    model,  # Llama,
+    model: Any,
     dataset: Dataset,
     n_inference_repeats: int,
     max_new_tokens: int,
     temperature: float = 1.0,
     top_p: float = 1.0,
     output_schema_model: Type[BaseModel] | None = None,
-    *args, **kwargs,
+    use_output_guide: bool = False,
+    *args: Any,
+    **kwargs: Any,
 ) -> list[list[str]]:
-    """
-    Runs inference with llama-cpp-python
-    """
-    # Build response format
-    # TODO: CHECK IF THAT WORKS (NEVER TESTED SINCE I AM NOT USING LLAMA-CPP ANYMORE)
-    _, response_format = _setup_inference_output(output_schema_model)
+    """Run llama-cpp-python inference; this backend remains minimally supported."""
+    response_format = (
+        {"type": "json_object"}
+        if use_output_guide and output_schema_model is not None
+        else None
+    )
 
-    # Run llama-cpp model on the dataset
     all_outputs = []
     for messages in tqdm(dataset["messages"], desc="Generating inferences (llama-cpp)"):
         prompt_outputs = []
-
-        # Loop n_inference_repeats times for each message
         for _ in range(n_inference_repeats):
-            response = model.create_chat_completion(
-                messages=messages,
-                max_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                response_format=response_format,
-            )
+            request_kwargs: dict[str, Any] = {
+                "messages": messages,
+                "max_tokens": max_new_tokens,
+                "temperature": temperature,
+                "top_p": top_p,
+            }
+            if response_format is not None:
+                request_kwargs["response_format"] = response_format
 
-            # Each response has one choice, so we get it at index 0
+            response = model.create_chat_completion(**request_kwargs)
             content = response["choices"][0]["message"]["content"]
-            prompt_outputs.append(content.strip())
-            
+            prompt_outputs.append((content or "").strip())
         all_outputs.append(prompt_outputs)
 
     return all_outputs
+
+
+def _validate_outputs(
+    output_texts: list[list[str]],
+    expected_samples: int,
+    expected_repeats: int,
+) -> None:
+    """Fail explicitly instead of silently truncating outputs through zip()."""
+    if len(output_texts) != expected_samples:
+        raise RuntimeError(
+            f"Expected outputs for {expected_samples} samples, "
+            f"but received {len(output_texts)}."
+        )
+
+    actual_counts = [len(outputs) for outputs in output_texts]
+    if any(count != expected_repeats for count in actual_counts):
+        raise RuntimeError(
+            "Some samples returned an unexpected number of completions. "
+            f"Expected {expected_repeats}; got {actual_counts}."
+        )
 
 
 def process_samples(
@@ -330,16 +381,23 @@ def process_samples(
     max_new_tokens: int = 512,
     temperature: float = 1.0,
     top_p: float = 1.0,
-    *args, **kwargs,
+    top_k: int = 0,
+    min_p: float = 0.0,
+    presence_penalty: float = 0.0,
+    repetition_penalty: float = 1.0,
+    *args: Any,
+    **kwargs: Any,
 ) -> Dataset:
-    """
-    Run inference on dataset samples using vLLM, llama-cpp, or mock backends.
-    """
-    # Retrieve output schema if requested (to guide LLM inference)
-    schema_arg = kwargs.get("schema") or kwargs.get("schema_config") or output_schema_name
+    """Run inference and attach raw and schema-validated outputs to a dataset."""
+    runtime_kwargs = dict(kwargs)
+    use_output_guide = bool(runtime_kwargs.pop("use_output_guide", False))
+    schema_arg = (
+        runtime_kwargs.get("schema")
+        or runtime_kwargs.get("schema_config")
+        or output_schema_name
+    )
     output_schema_model = resolve_schema_model(schema_arg)
 
-    # Define arguments for model inference 
     infer_args = {
         "model": model,
         "dataset": dataset,
@@ -347,37 +405,45 @@ def process_samples(
         "max_new_tokens": max_new_tokens,
         "temperature": temperature,
         "top_p": top_p,
+        "top_k": top_k,
+        "min_p": min_p,
+        "presence_penalty": presence_penalty,
+        "repetition_penalty": repetition_penalty,
         "output_schema_model": output_schema_model,
         "enable_thinking": enable_thinking,
         "max_thinking_tokens": max_thinking_tokens,
-        "use_output_guide": kwargs.get("use_output_guide", False),
-        **kwargs,
+        "use_output_guide": use_output_guide,
+        **runtime_kwargs,
     }
 
-    # Run inference using the correct backend
     match inference_backend:
-        case "vllm": output_texts = _infer_vllm(**infer_args)
-        case "vllm-serve": output_texts = _infer_vllm_serve(**infer_args)
-        case "llama-cpp": output_texts = _infer_llama_cpp(**infer_args)
-        case "vllm-serve-async": output_texts = asyncio.run(_infer_vllm_serve_async(**infer_args))
-        case "mock": output_texts = _infer_mock(**infer_args)
-        case _: raise ValueError(f"Unknown inference backend: {inference_backend}")
+        case "vllm":
+            output_texts = _infer_vllm(**infer_args)
+        case "vllm-serve":
+            output_texts = _infer_vllm_serve(**infer_args)
+        case "vllm-serve-async":
+            output_texts = asyncio.run(_infer_vllm_serve_async(**infer_args))
+        case "llama-cpp":
+            output_texts = _infer_llama_cpp(**infer_args)
+        case "mock":
+            output_texts = _infer_mock(**infer_args)
+        case _:
+            raise ValueError(f"Unknown inference backend: {inference_backend}")
 
+    _validate_outputs(
+        output_texts=output_texts,
+        expected_samples=len(dataset),
+        expected_repeats=n_inference_repeats,
+    )
 
-    # Extract data using the model and required inference backend
-    transposed_output_texts = list(zip(*output_texts))
-    for i, model_outputs in enumerate(transposed_output_texts):
-
-        # Add raw output text, adding the model index
-        column_name = f"output_text_{i:03d}"
+    for inference_idx, model_outputs in enumerate(zip(*output_texts)):
+        column_name = f"output_text_{inference_idx:03d}"
         dataset = dataset.add_column(name=column_name, column=model_outputs)
-
-        # Define function to add structured output, keeping the model index in the output column
         mapping_fn = partial(
             _map_and_structure_output,
             output_schema_model=output_schema_model,
             col_to_structure=column_name,
-            inference_idx=i,
+            inference_idx=inference_idx,
         )
         dataset = dataset.map(mapping_fn, desc="Extracting model predictions")
 
@@ -391,20 +457,13 @@ def _map_and_structure_output(
     col_to_structure: str,
     inference_idx: int,
 ) -> dict[str, Any]:
-    """
-    Extracts structured data from a single sample's text output and add the index
-    of the inference that generated that output
-    """
+    """Parse one raw model output and suffix structured fields by repeat index."""
     structured_dict = extract_structured_output(
         sample=sample,
         output_schema_model=output_schema_model,
         col_to_structure=col_to_structure,
     )
-
-    # Add the inference index to make column names unique
-    return {f"{k}_{inference_idx:03d}": v for k, v in structured_dict.items()}
-
-
+    return {f"{key}_{inference_idx:03d}": value for key, value in structured_dict.items()}
 
 
 def _infer_mock(
@@ -412,40 +471,39 @@ def _infer_mock(
     dataset: Dataset,
     n_inference_repeats: int,
     output_schema_model: Type[BaseModel] | None = None,
-    *args, **kwargs,
+    *args: Any,
+    **kwargs: Any,
 ) -> list[list[str]]:
-    """
-    Simulates LLM inference for fast offline verification.
-    """
+    """Simulate schema-compatible outputs for offline pipeline verification."""
     all_outputs = []
     for sample in dataset:
-        mock_dict = {}
-        if output_schema_model:
-            for fname in output_schema_model.model_fields.keys():
-                gt_key = f"ground_truth_{fname}"
-                gt_val = sample[gt_key] if gt_key in sample else sample.get(fname)
-                
-                # Check for pandas/numpy NaN
-                if gt_val is not None and not (isinstance(gt_val, float) and math.isnan(gt_val)):
-                    mock_dict[fname] = gt_val
-                elif fname.lower() == "mrs":
-                    mock_dict[fname] = 0
-                elif "smoke" in fname.lower() or "smoking" in fname.lower():
-                    mock_dict[fname] = "Non-smoker"
-                elif "aneurysm" in fname.lower() or "size" in fname.lower():
-                    mock_dict[fname] = None
-                elif "hyper" in fname.lower():
-                    mock_dict[fname] = "No"
-                elif "age" in fname.lower():
-                    mock_dict[fname] = 60
-                elif "location" in fname.lower() or "lesion" in fname.lower():
-                    mock_dict[fname] = "None"
+        mock_dict: dict[str, Any] = {}
+        if output_schema_model is not None:
+            for field_name in output_schema_model.model_fields:
+                ground_truth_key = f"ground_truth_{field_name}"
+                ground_truth_value = sample.get(ground_truth_key, sample.get(field_name))
+
+                if ground_truth_value is not None and not (
+                    isinstance(ground_truth_value, float)
+                    and math.isnan(ground_truth_value)
+                ):
+                    mock_dict[field_name] = ground_truth_value
+                elif field_name.lower() == "mrs":
+                    mock_dict[field_name] = 0
+                elif "smoke" in field_name.lower() or "smoking" in field_name.lower():
+                    mock_dict[field_name] = "Non-smoker"
+                elif "aneurysm" in field_name.lower() or "size" in field_name.lower():
+                    mock_dict[field_name] = None
+                elif "hyper" in field_name.lower():
+                    mock_dict[field_name] = "No"
+                elif "age" in field_name.lower():
+                    mock_dict[field_name] = 60
+                elif "location" in field_name.lower() or "lesion" in field_name.lower():
+                    mock_dict[field_name] = "None"
                 else:
-                    mock_dict[fname] = "Sample"
+                    mock_dict[field_name] = "Sample"
 
         mock_json = json.dumps(mock_dict, indent=2)
-        sample_outputs = [mock_json for _ in range(n_inference_repeats)]
-        all_outputs.append(sample_outputs)
+        all_outputs.append([mock_json for _ in range(n_inference_repeats)])
 
     return all_outputs
-

@@ -173,3 +173,95 @@ def sample_small_balanced_dataset(
     print(f"Selected distributed debug subset: {len(result)}/{len(df_data)} rows; {len(profile_groups)} profiles still had unselected rows.")
 
     return result
+
+
+def estimate_token_distribution(
+    dataset: Dataset,
+    text_column: str = "input_text",
+    tokenizer_name_or_path: str | None = None,
+) -> dict:
+    """
+    Computes exact or heuristic token counts across dataset entries and prints distribution metrics.
+    """
+    texts = [str(t) for t in dataset[text_column] if t is not None]
+    if not texts:
+        print("No valid text records found to compute token counts.")
+        return {}
+
+    token_counts = []
+    mode = "heuristic"
+
+    # Attempt exact tokenization if a model/tokenizer identifier is provided
+    if tokenizer_name_or_path:
+        try:
+            from transformers import AutoTokenizer
+
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, trust_remote_code=True)
+            print(f"Tokenizing using exact tokenizer: '{tokenizer_name_or_path}'...")
+            # Fast batch encoding without special token overhead
+            encodings = tokenizer(texts, add_special_tokens=False, truncation=False)["input_ids"]
+            token_counts = [len(ids) for ids in encodings]
+            mode = "exact"
+        except Exception as err:
+            print(f"Failed to load tokenizer '{tokenizer_name_or_path}' ({err}). Falling back to heuristic estimation.")
+
+    # Heuristic fallback: Clinical texts average ~3.8-4.2 characters or ~1.3 tokens per whitespace word
+    if not token_counts:
+        print("Using heuristic estimation (~1 token ≈ 4 characters / 0.75 words)...")
+        token_counts = [
+            max(1, int(np.ceil(max(len(t) / 4.0, len(t.split()) / 0.75))))
+            for t in texts
+        ]
+
+    counts_arr = np.array(token_counts)
+    stats = {
+        "count": len(counts_arr),
+        "mean": float(np.mean(counts_arr)),
+        "std": float(np.std(counts_arr)),
+        "min": int(np.min(counts_arr)),
+        "p25": int(np.percentile(counts_arr, 25)),
+        "median (p50)": int(np.median(counts_arr)),
+        "p75": int(np.percentile(counts_arr, 75)),
+        "p95": int(np.percentile(counts_arr, 95)),
+        "p99": int(np.percentile(counts_arr, 99)),
+        "max": int(np.max(counts_arr)),
+    }
+
+    print("\n" + "=" * 55)
+    print(f" TOKEN LENGTH DISTRIBUTION ANALYSIS ({mode.upper()}) ")
+    print("=" * 55)
+    print(f"Records Evaluated : {stats['count']}")
+    print(f"Mean ± Std        : {stats['mean']:.1f} ± {stats['std']:.1f}")
+    print(f"Min / Max         : {stats['min']} / {stats['max']}")
+    print(f"Median (p50)      : {stats['median (p50)']}")
+    print(f"p75 / p95 / p99   : {stats['p75']} / {stats['p95']} / {stats['p99']}")
+    print("=" * 55)
+
+    # Context length recommendation
+    recommended_len = int(np.ceil(stats["p99"] + 1024))  # account for generation/thinking budget
+    print(f"Suggested vLLM --max-model-len: {min(recommended_len, 8192)} (based on p99 + 1024 budget)\n")
+
+    return stats
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Test data loading and compute input token distribution.")
+    parser.add_argument("--input-path", type=str, default="data/data_2024/processed/dataset.csv", help="Path to input dataset file.")
+    parser.add_argument("--text-column", type=str, default="input_text", help="Name of input text column.")
+    parser.add_argument("--tokenizer", type=str, default="Qwen/Qwen3.8-27B", help="Hugging Face tokenizer name or local path.")
+    parser.add_argument("--max-samples", type=int, default=None, help="Optional max sample count.")
+    args = parser.parse_args()
+
+    # Load dataset
+    ds = load_data_formatted_for_benchmarking(
+        input_path=args.input_path,
+        input_text_column=args.text_column,
+        max_samples=args.max_samples,
+    )
+
+    # Estimate distribution
+    estimate_token_distribution(
+        dataset=ds,
+        text_column="input_text",
+        tokenizer_name_or_path=args.tokenizer,
+    )
