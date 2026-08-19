@@ -30,6 +30,7 @@ model:
   # model_path: "cyankiwi/Qwen3.6-27B-AWQ-INT4"
   model_path: "unsloth/Qwen3.8-27B-NVFP4"
   quant_scheme: null  # only used if model_path.lower() contains "gguf"
+  reasoning_parser: auto  # auto | qwen3 | deepseek_r1 | granite | hunyuan | null
 
   # Inference configuration
   inference_backend: "vllm-serve-async"  # vllm | vllm-serve | vllm-serve-async | llama-cpp | mock

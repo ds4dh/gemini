@@ -1,59 +1,27 @@
-# GEMINI: Clinical Text Variable Extraction Pipeline
+# GEMINI: Clinical text variable extraction pipeline
 
-`gemini` is a flexible, modular, high-performance data extraction pipeline engineered to extract structured clinical variables from free-form medical text (such as discharge summaries, consultation notes, and imaging reports) using Large Language Models (LLMs) to build databases for digital twin models.
-
----
-
-## Key Features
-
-- **Modular Configuration Architecture (`configs/`)**:
-  - Separate run execution parameters (`configs/run_cfg.yaml`) from extraction schemas & prompt templates (`configs/extraction_cfgs/*.yaml`).
-  - Supports unified config loading or dynamic CLI overrides for run/extraction parameters.
-  - Automatically snapshots configuration files (`run_cfg.yaml`, `extraction_cfg.yaml`) into timestamped output folders (`results/run_YYYYMMDD_HHMMSS/`) for exact experimental reproducibility.
-
-- **Integrated & Hard Reasoning Control**:
-  - Fine-grained reasoning configuration (`model.reasoning`): `enabled` (`auto` | `true` | `false`), `effort` (`auto` | `off` | `low` | `medium` | `high` | `xhigh`), and `preserve_thinking` toggle for multi-turn conversations.
-  - **Hard Thinking Token Budget**: Enforces custom hard caps on thought generation (`hard_thinking_token_budget`), automatically injecting thought-ending tokens (`</think>`) when the budget limit is reached.
-  - **Dynamic Prompt Context**: Adapts system prompt instructions based on reasoning capabilities (`context_data_nothinking`).
-
-- **XGrammar Constrained Decoding & Guided JSON Generation**:
-  - Integrated stateful custom vLLM logits processor (`ThinkingJSONAdapterProcessor`) using **XGrammar**.
-  - Seamlessly orchestrates generation phases:
-    1. **`THINKING` Phase**: Freeform or hard-capped reasoning generation.
-    2. **`FINAL_JSON` Phase**: Enforces strict JSON Schema compliance at the logit level via next-token bitmasking once reasoning completes.
-
-- **Multi-Stage Resilient Parsing & Regex Fallback**:
-  - Multi-stage extraction engine (`extract_structured_output`):
-    1. Post-think block parsing (extracts JSON target following `</think>`, `</thought>`, or `</reasoning>`).
-    2. Code fence extraction (` ```json ... ``` `).
-    3. Balanced stack-based JSON object/array matching.
-    4. Truncated JSON auto-repair.
-    5. Type-aware field-by-field regex extraction fallback.
-
-- **Expanded Multi-Backend Inference**:
-  - **`vllm-serve-async`**: High-throughput asynchronous vLLM OpenAI API client supporting multi-request concurrency (`max_concurrent_requests`) and server sequence handling (`max_concurrent_inferences` / `--max-num-seqs`).
-  - **`vllm` / `vllm-serve`**: Synchronous direct Python or server-based GPU inference.
-  - **`llama-cpp`**: GGUF model execution with automated multi-shard Hugging Face downloading (`download_gguf_by_quant`) and automatic `gguf-split` merging.
-  - **`mock`**: Instant offline execution mode for verifying pipeline logic, schema compilation, and prompt formatting without GPU resources.
-
-- **Modern Quantization Formats**:
-  - Native support for **NVFP4** (NVIDIA FP4 quantization, e.g., `unsloth/Qwen3.8-27B-NVFP4`), **AWQ** (`awq_marlin`), **FP8**, **GPTQ**, and **GGUF** models.
-
-- **Stateful Resuming & Incremental Checkpointing**:
-  - Incremental chunk saving (`save_chunk_size`) writes progress periodically to `_chunks.csv`.
-  - **Run Continuation**: Enables `resume_previous_run: true` to detect interrupted runs, filtering out already processed patient/record IDs to resume seamlessly without duplicate processing.
-
-- **Cross-Platform & HPC Support**:
-  - Dynamic Windows CUDA DLL path configuration (`CUDA_PATH`, `CUDA_LIB_PATH`) and DLL search directory registration.
-  - Automated network interface detection for PyTorch Distributed / vLLM on Linux HPC nodes (Gloo/NCCL socket interface binding).
+`gemini` is a flexible, modular, high-performance pipeline for extracting structured clinical variables from free-form medical text (such as discharge summaries, consultation notes, and imaging reports) using Large Language Models (LLMs) to build databases for digital twin models.
 
 ---
 
-## Installation & Environment Setup
+## Key features
 
-### 1. Local Development Setup (`uv`)
+- **Modular configuration architecture (`configs/`)**: Separates run execution settings (`configs/run_cfg.yaml`) from extraction schemas and prompts (`configs/extraction_cfgs/*.yaml`). Configuration snapshots are automatically saved to output directories for exact reproducibility.
+- **Integrated and hard reasoning control**: Configurable reasoning (`enabled`, `effort`, `preserve_thinking`) with an optional `hard_thinking_token_budget` that forces a `</think>` token when token limits are met.
+- **XGrammar constrained decoding and guided JSON generation**: Custom vLLM logits processor (`ThinkingJSONAdapterProcessor`) enforcing two-phase generation: freeform/hard-capped reasoning (`THINKING`) followed by strict logit-level JSON Schema mask (`FINAL_JSON`).
+- **Multi-stage resilient parsing and regex fallback**: Automatic parsing order from post-think blocks (`</think>`), markdown fences, stacked JSON structures, repaired truncated JSONs, down to field-by-field regex fallback.
+- **Expanded multi-backend inference**: Supports `vllm-serve-async` (high-throughput async client with request/sequence concurrency), `vllm`, `vllm-serve`, `llama-cpp` (GGUF with auto-downloading and shard merging), and `mock` (offline testing).
+- **Modern quantization formats**: Built-in support for NVFP4 (NVIDIA FP4), AWQ (`awq_marlin`), FP8, GPTQ, and GGUF models.
+- **Stateful resuming and incremental checkpointing**: Writes progress periodically (`save_chunk_size`) to `_chunks.csv` and supports `resume_previous_run: true` to skip already extracted records.
+- **Cross-platform and HPC support**: Automated CUDA DLL path setup on Windows and network socket interface detection (Gloo/NCCL) on Slurm/Apptainer HPC nodes.
 
-Dependency management and virtual environment isolation are handled via `uv`.
+---
+
+## Installation and environment setup
+
+### 1. Local development setup (`uv`)
+
+Dependency management and environment isolation are handled via `uv`.
 
 #### Install `uv`
 - **Windows (PowerShell)**:
@@ -65,46 +33,41 @@ Dependency management and virtual environment isolation are handled via `uv`.
   curl -LsSf https://astral.sh/uv/install.sh | sh
   ```
 
-#### Create Virtual Environment & Install Dependencies
-Run the following commands from the repository root:
+#### Create virtual environment and install dependencies
 ```bash
-# Create virtual environment
+# Create and activate virtual environment
 uv venv
 
-# Activate environment:
 # PowerShell (Windows): .venv\Scripts\Activate.ps1
-# Command Prompt (cmd): .venv\Scripts\activate.bat
 # Linux / macOS:        source .venv/bin/activate
 
 # Install dependencies in editable mode
 uv pip install -e .
 ```
 
-*Note for Windows vLLM Native Installation*:
-To run `vllm` natively on Windows, download the matching `.whl` binary wheel from [SystemPanic/vllm-windows Releases](https://github.com/SystemPanic/vllm-windows/releases) and install it using:
+*Note for native Windows vLLM installation*:
+Download the matching `.whl` wheel from [SystemPanic/vllm-windows Releases](https://github.com/SystemPanic/vllm-windows/releases) and install using:
 ```powershell
-uv pip install path/to/downloaded/vllm-0.26.0+cu132-cp312-cp312-win_amd64.whl --extra-index-url https://download.pytorch.org/whl/cu130
+uv pip install path/to/vllm-0.26.0+cu132-cp312-cp312-win_amd64.whl --extra-index-url https://download.pytorch.org/whl/cu130
 ```
 
 ---
 
-### 2. HPC Cluster Setup (Apptainer / Singularity)
+### 2. HPC cluster setup (Apptainer / Singularity)
 
-For execution on HPC environments (e.g., Slurm cluster nodes):
-
-Submit the container build script to Slurm to generate `research-env.sif`:
+To build the container image on Slurm HPC clusters:
 ```bash
 sbatch research-env.sbatch
 ```
 
 ---
 
-## Pipeline Architecture & Configuration
+## Pipeline architecture and configuration
 
-The configuration framework is divided into **Run Execution Configuration** and **Extraction Configuration**.
+Configuration is decoupled into **run execution configuration** and **target extraction configuration**.
 
-### 1. Run Execution Configuration (`configs/run_cfg.yaml`)
-Controls hardware, server options, model parameters, reasoning limits, and output destinations:
+### 1. Run execution configuration (`configs/run_cfg.yaml`)
+Controls backend options, model parameters, reasoning settings, and output options:
 
 ```yaml
 data:
@@ -126,6 +89,7 @@ output:
 
 model:
   model_path: "unsloth/Qwen3.8-27B-NVFP4"
+  reasoning_parser: auto # auto | qwen3 | deepseek_r1 | granite | hunyuan | null
   inference_backend: "vllm-serve-async" # vllm | vllm-serve | vllm-serve-async | llama-cpp | mock
   n_inference_repeats: 10
   max_concurrent_requests: 3
@@ -153,8 +117,8 @@ model:
 
 ---
 
-### 2. Target Extraction Configuration (`configs/extraction_cfgs/*.yaml`)
-Defines the runtime Pydantic schema, prompt templates, and domain guidelines.
+### 2. Target extraction configuration (`configs/extraction_cfgs/*.yaml`)
+Defines the Pydantic schema, prompt templates, and extraction guidelines.
 
 Example schema (`configs/extraction_cfgs/clinical_variables.yaml`):
 
@@ -195,23 +159,21 @@ prompt:
 
 ---
 
-## Usage Guide
+## Usage guide
 
-### 1. Running the Pipeline (`scripts/run_pipeline.py`)
+### 1. Running the pipeline (`scripts/run_pipeline.py`)
 
-Run the pipeline using configuration files or command-line arguments:
-
-#### Offline Mock Run (Logic & Schema Validation)
+#### Offline mock run (logic and schema validation)
 ```bash
 python scripts/run_pipeline.py --backend mock
 ```
 
-#### Standard Execution (Default YAML Configs)
+#### Standard execution (default YAML configs)
 ```bash
 python scripts/run_pipeline.py
 ```
 
-#### Custom Config & Model Execution
+#### Custom config and model execution
 ```bash
 python scripts/run_pipeline.py \
     --run-config configs/run_cfg.yaml \
@@ -224,7 +186,7 @@ python scripts/run_pipeline.py \
 
 ---
 
-### 2. Dynamic CLI Arguments Reference
+### 2. Dynamic CLI arguments reference
 
 | Parameter | Short | Description |
 | :--- | :--- | :--- |
@@ -243,48 +205,38 @@ python scripts/run_pipeline.py \
 
 ---
 
-### 3. Resuming Interrupted Runs
+### 3. Resuming interrupted runs
 
-To resume an incomplete extraction run, set `resume_previous_run: true` in `configs/run_cfg.yaml`.
-The pipeline automatically scans the output directory for recent `run_*` folders containing `_chunks.csv` files, identifies previously extracted patient/record IDs, and processes only the remaining unprocessed entries.
-
----
-
-### 4. Running Experiment Batches
-
-- **Local Execution Script**:
-  ```bash
-  ./experiments/experiment_curated.sh
-  ```
-- **HPC Slurm Execution**:
-  ```bash
-  sbatch scripts/run_benchmark.sh
-  ```
+Set `resume_previous_run: true` in `configs/run_cfg.yaml`. The pipeline scans the output folder for existing `_chunks.csv` files, tracks completed IDs, and resumes processing remaining records.
 
 ---
 
-## Outputs & Reporting Structure
+### 4. Running experiment batches
 
-Execution outputs are saved inside timestamped subfolders under the designated output directory (`results/run_YYYYMMDD_HHMMSS/`):
+- **Local execution script**: `./experiments/experiment_curated.sh`
+- **HPC Slurm execution**: `sbatch scripts/run_benchmark.sh`
+
+---
+
+## Outputs and reporting structure
+
+Results are saved inside timestamped subfolders under the output directory (`results/run_YYYYMMDD_HHMMSS/`):
 
 ```
 results/run_20260819_120000/
 ├── run_cfg.yaml                     # Snapshot of run execution config
-├── extraction_cfg.yaml              # Snapshot of target schema & prompt config
-├── detailed_clinical_database.csv   # Comprehensive row-by-row extraction database
+├── extraction_cfg.yaml              # Snapshot of target schema and prompt config
+├── detailed_clinical_database.csv   # Row-by-row extraction database with raw outputs and traces
 ├── summary_clinical_database.csv    # Consolidated consensus values across repeats
-├── extraction_report.json           # Computational metrics, token counts, and accuracy stats
+├── extraction_report.json           # Computational metrics, token counts, and accuracy statistics
 └── report.md                        # Formatted Markdown report summary
 ```
 
-- **Detailed Database (`detailed_clinical_database.csv`)**: Contains individual output iterations, raw text generation, reasoning thinking trace, parsed JSON fields, and validation status per repeat.
-- **Summary Database (`summary_clinical_database.csv`)**: Contains aggregated consensus values computed across inference repeats (`n_inference_repeats`).
-
 ---
 
-## Synthetic Dataset Generation
+## Synthetic dataset generation
 
-Generate synthetic clinical notes with ground-truth labels for offline development and validation:
+Generate synthetic clinical notes with ground-truth labels for development and testing:
 
 ```bash
 python scripts/generate_synthetic_data.py
@@ -293,15 +245,15 @@ Outputs `data/synthetic_clinical_notes.csv`.
 
 ---
 
-## Repository Structure
+## Repository structure
 
 ```
 gemini/
 ├── configs/
 │   ├── run_cfg.yaml                   # Model execution, backend, hardware, and reasoning settings
 │   └── extraction_cfgs/
-│       ├── mrs_score.yaml             # Single-variable mRS score extraction schema & prompt
-│       └── clinical_variables.yaml    # Multi-variable (mRS, smoking, aneurysm) schema & prompt
+│       ├── mrs_score.yaml             # Single-variable mRS score extraction schema and prompt
+│       └── clinical_variables.yaml    # Multi-variable (mRS, smoking, aneurysm) schema and prompt
 ├── pyproject.toml                     # Project packaging and dependency specs
 ├── data/                              # Datasets and synthetic test records
 │   └── synthetic_clinical_notes.csv

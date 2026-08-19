@@ -288,6 +288,16 @@ def normalize_pipeline_config(raw_cfg: dict[str, Any]) -> dict[str, Any]:
     cfg.setdefault("model_path", "Qwen/Qwen2.5-0.5B-Instruct")
     cfg.setdefault("quant_scheme", None)
 
+    raw_reasoning_parser = (
+        model_section.get("reasoning_parser")
+        if "reasoning_parser" in model_section
+        else cfg.get("reasoning_parser", "auto")
+    )
+    cfg["reasoning_parser"] = resolve_reasoning_parser(
+        cfg["model_path"],
+        raw_reasoning_parser,
+    )
+
     cfg.setdefault("n_inference_repeats", 1)
     cfg.setdefault("max_concurrent_requests", 1)
     cfg.setdefault("max_concurrent_inferences", 1)
@@ -434,6 +444,64 @@ def extract_quant_method(
 
     # If no known quantization method is found, the model is likely in a 
     # native format like FP16 or BF16
+    return None
+
+
+def resolve_reasoning_parser(
+    model_id_or_path: str,
+    reasoning_parser: str | None = "auto",
+) -> str | None:
+    """
+    Resolves the reasoning parser to pass to vLLM's OpenAI server entrypoint.
+    If reasoning_parser is 'auto', inspects the model ID/path and HuggingFace tags/card
+    for known reasoning parser patterns (qwen3, deepseek_r1, granite, hunyuan).
+    """
+    if reasoning_parser is None or reasoning_parser is False or reasoning_parser == "":
+        return None
+
+    if isinstance(reasoning_parser, str) and reasoning_parser.lower() not in ("auto", ""):
+        return reasoning_parser
+
+    # Auto resolution based on model_id_or_path inspection
+    lower_path = model_id_or_path.lower()
+
+    if any(k in lower_path for k in ("qwen3", "qwen-3", "qwen_3")):
+        return "qwen3"
+
+    if any(k in lower_path for k in ("deepseek-r1", "deepseek_r1", "r1-distill", "r1_distill")):
+        return "deepseek_r1"
+
+    if "granite" in lower_path and any(k in lower_path for k in ("reasoning", "think")):
+        return "granite"
+
+    if "hunyuan" in lower_path and any(k in lower_path for k in ("reasoning", "think")):
+        return "hunyuan"
+
+    # Secondary check: Hugging Face hub metadata
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi()
+        model_info = api.model_info(model_id_or_path)
+
+        card_data = model_info.card_data or {}
+        base_model = card_data.get("base_model") or ""
+        if isinstance(base_model, list):
+            base_model = " ".join(base_model)
+
+        tags = " ".join(model_info.tags or []).lower()
+        search_target = f"{base_model} {tags}".lower()
+
+        if any(k in search_target for k in ("qwen3", "qwen-3", "qwen_3")):
+            return "qwen3"
+        if any(k in search_target for k in ("deepseek-r1", "deepseek_r1", "r1-distill")):
+            return "deepseek_r1"
+        if "granite" in search_target and "reasoning" in search_target:
+            return "granite"
+        if "hunyuan" in search_target and "reasoning" in search_target:
+            return "hunyuan"
+    except Exception:
+        pass
+
     return None
 
 
