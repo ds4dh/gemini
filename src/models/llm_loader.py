@@ -1,34 +1,31 @@
+from __future__ import annotations
+
 import os
 import re
 import socket
 import subprocess
 import sys
 import time
+from typing import Any
 from warnings import warn
 
 import httpx
 import psutil
 import torch
-from typing import Any
 from huggingface_hub import HfApi, hf_hub_download, list_repo_files, snapshot_download
 from transformers import AutoTokenizer
 
-try:
-    from vllm import LLM
-except ImportError:
-    LLM = None
+from vllm import LLM
+from openai import AsyncOpenAI, OpenAI
 
 try:
     from llama_cpp import Llama
 except ImportError:
     Llama = None
 
-try:
-    from openai import AsyncOpenAI, OpenAI
-except ImportError:
-    OpenAI, AsyncOpenAI = None, None
-
 from src.utils.run_utils import extract_quant_method
+
+
 
 THINKING_JSON_ADAPTER_PROCESSOR = (
     "src.models.logits_processors:ThinkingJSONAdapterProcessor"
@@ -36,74 +33,86 @@ THINKING_JSON_ADAPTER_PROCESSOR = (
 
 
 def select_server_logits_processors(
-    *,
     use_output_guide: bool,
-    max_thinking_tokens: int | None,
 ) -> list[str]:
-    """
-    Select custom vLLM server logits processors.
-    ThinkingJSONAdapterProcessor owns both:
-    - the custom thinking-budget mechanism; and
-    - custom XGrammar JSON-schema constrained decoding.
-    """
+    """Select the only custom processor used for guided server requests."""
     if use_output_guide:
         return [THINKING_JSON_ADAPTER_PROCESSOR]
-
-    if max_thinking_tokens is not None:
-        raise ValueError(
-            "max_thinking_tokens requires use_output_guide=True because "
-            "ThinkingJSONAdapterProcessor owns the thinking-budget logic."
-        )
-
     return []
 
 
 def _detect_hf_config_quant_method(model_path: str) -> str | None:
-    """
-    Extracts quantization method directly from HF model config.json if available.
-    """
+    """Read a Hugging Face model's declared quantization method, if present."""
     try:
         from transformers import AutoConfig
-        config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-        q_cfg = getattr(config, "quantization_config", None)
-        if isinstance(q_cfg, dict):
-            return q_cfg.get("quant_method")
-        elif hasattr(q_cfg, "quant_method"):
-            return getattr(q_cfg, "quant_method")
+
+        config = AutoConfig.from_pretrained(
+            model_path,
+            trust_remote_code=True,
+        )
+        quantization_config = getattr(config, "quantization_config", None)
+
+        if isinstance(quantization_config, dict):
+            return quantization_config.get("quant_method")
+
+        if hasattr(quantization_config, "quant_method"):
+            return quantization_config.quant_method
     except Exception:
         pass
+
     return None
+
+
+def _prepare_gguf_model(
+    model_path: str,
+    quant_scheme: str | None,
+) -> tuple[str, str]:
+    """Download/merge one GGUF model file and resolve its base tokenizer."""
+    if not quant_scheme:
+        raise ValueError(
+            "quant_scheme is required when model_path identifies a GGUF repository."
+        )
+
+    tokenizer_name = get_tokenizer_name(model_path)
+    if not tokenizer_name:
+        raise ValueError(
+            f"Could not determine the base tokenizer for GGUF repository "
+            f"{model_path!r}. Add base_model metadata to the Hugging Face card "
+            "or provide a repository that exposes it."
+        )
+
+    local_gguf_path = download_gguf_by_quant(
+        model_id=model_path,
+        quant_scheme=quant_scheme,
+    )
+    return local_gguf_path, tokenizer_name
 
 
 def _load_model_vllm(
     model_path: str,
-    quant_scheme: str|None = None,
-    quant_method: str|None = None,
-    max_context_length: int|None = None,
-    num_gpus_to_use: int|None = None,
+    quant_scheme: str | None = None,
+    quant_method: str | None = None,
+    max_context_length: int | None = None,
+    num_gpus_to_use: int | None = None,
     gpu_memory_utilization: float = 0.9,
     enforce_eager: bool = True,
-    *args, **kwargs
-):
-    """
-    Load a model using the vLLM backend
-    """
+    *args: Any,
+    **kwargs: Any,
+) -> LLM:
+    """Load a model with direct Python vLLM, including local GGUF support."""
     if LLM is None:
         raise ImportError(
-            "vLLM package is not installed in this Python environment.\n"
-            "Note: Standard vLLM cannot be installed via default `pip install` on native Windows.\n\n"
-            "Options on Windows:\n"
-            "  1. Switch to `inference_backend: llama-cpp` in config.yaml for GGUF models.\n"
-            "  2. Install a prebuilt Windows vLLM wheel (see README.md).\n"
-            "  3. Run inside WSL2 (Windows Subsystem for Linux) or on a Linux GPU server."
+            "vLLM is not installed. On Windows, use a compatible vLLM wheel, "
+            "WSL2, Linux, or the llama-cpp backend."
         )
 
     if "VLLM_DP_MASTER_PORT" not in os.environ:
         from src.utils.run_utils import set_distributed_environment
+
         set_distributed_environment()
 
-    # Initialize vLLM model arguments
-    model_args = {
+    model_args: dict[str, Any] = {
+        "model": model_path,
         "trust_remote_code": True,
         "max_model_len": max_context_length,
         "tensor_parallel_size": num_gpus_to_use,
@@ -111,40 +120,55 @@ def _load_model_vllm(
         "enforce_eager": enforce_eager,
     }
 
-    # Check if quantization method is already defined in model's config.json
-    config_quant = _detect_hf_config_quant_method(model_path)
-
-    model_args.update({"model": model_path})
-
-    if config_quant:
-        print(f"Detected quantization method '{config_quant}' in model config.json. Letting vLLM auto-detect.")
-        model_args["quantization"] = None
-    elif quant_method == "bnb":
-        raise ValueError(f"vLLM does not support format {quant_method}")
-    elif quant_method == "gguf":
-        raise ValueError(
-            "vLLM does not support GGUF quantization format.\n"
-            "Supported vLLM quantizations are: ['awq', 'gptq', 'fp8', 'bitsandbytes', 'torchao', etc.].\n\n"
-            "To use GGUF models, please change config.yaml to:\n"
-            "  inference_backend: \"llama-cpp\"\n"
-            "And install llama-cpp-python with: `uv pip install llama-cpp-python`"
+    if quant_method == "gguf":
+        local_gguf_path, tokenizer_name = _prepare_gguf_model(
+            model_path=model_path,
+            quant_scheme=quant_scheme,
+        )
+        model_args.update(
+            {
+                "model": local_gguf_path,
+                "tokenizer": tokenizer_name,
+                "quantization": None,
+                "enforce_eager": True,
+            }
         )
     else:
-        model_args["quantization"] = quant_method
-        if quant_method == "awq":
-            model_args.update({"dtype": "float16", "quantization": "awq_marlin"})
+        config_quant_method = _detect_hf_config_quant_method(model_path)
+
+        if config_quant_method:
+            print(
+                f"Detected quantization method {config_quant_method!r} in "
+                "model config; letting vLLM auto-detect it."
+            )
+            model_args["quantization"] = None
+        elif quant_method == "bnb":
+            raise ValueError("vLLM does not support the legacy 'bnb' alias.")
+        else:
+            model_args["quantization"] = quant_method
+            if quant_method == "awq":
+                model_args.update(
+                    {
+                        "dtype": "float16",
+                        "quantization": "awq_marlin",
+                    }
+                )
 
     try:
         return LLM(**model_args)
-    except Exception as e:
-        err_msg = str(e)
-        if "Quantization method specified" in err_msg or "ValidationError" in err_msg or "quantization" in err_msg.lower():
-            print(f"Notice: Explicit quantization setting failed ({e}). Retrying with vLLM auto-detection (quantization=None)...")
+    except Exception as exc:
+        error_message = str(exc).lower()
+        if quant_method != "gguf" and (
+            "quantization" in error_message or "validationerror" in error_message
+        ):
+            print(
+                "Explicit quantization setting failed; retrying with vLLM "
+                "auto-detection."
+            )
             model_args["quantization"] = None
-            if "dtype" in model_args:
-                del model_args["dtype"]
+            model_args.pop("dtype", None)
             return LLM(**model_args)
-        raise e
+        raise
 
 
 def _load_model_vllm_server(
@@ -154,7 +178,6 @@ def _load_model_vllm_server(
     reasoning_parser: str | None = None,
     logits_processors: list[str] | None = None,
     use_output_guide: bool = False,
-    max_thinking_tokens: int | None = None,
     max_context_length: int | None = None,
     max_concurrent_inferences: int | None = None,
     num_gpus_to_use: int = 1,
@@ -166,114 +189,80 @@ def _load_model_vllm_server(
     port: int | None = None,
     client_timeout: int | float = 43200,
     async_mode: bool = False,
-    *args,
-    **kwargs,
+    *args: Any,
+    **kwargs: Any,
 ) -> tuple[OpenAI | AsyncOpenAI, subprocess.Popen]:
-    """
-    Start a vLLM OpenAI-compatible server.
+    """Start vLLM's OpenAI server, supporting HF and local downloaded GGUF."""
+    if OpenAI is None or AsyncOpenAI is None:
+        raise ImportError("The openai package is required for vLLM server clients.")
 
-    For guided requests, exactly one custom processor is registered:
-    ThinkingJSONAdapterProcessor.
+    served_model_path = model_path
+    tokenizer_name: str | None
+    vllm_quant: str | None
 
-    That adapter owns both custom behaviors:
-    1. Force </think> when max_thinking_tokens is reached.
-    2. Apply the XGrammar JSON-schema token mask after thinking completes.
-    """
     if quant_method == "gguf":
-        raise ValueError(
-            "The vLLM server backend does not support GGUF in this pipeline. "
-            "Use inference_backend='llama-cpp' for GGUF models."
+        # vLLM detects a local .gguf file; do not pass --quantization gguf.
+        served_model_path, tokenizer_name = _prepare_gguf_model(
+            model_path=model_path,
+            quant_scheme=quant_scheme,
         )
+        vllm_quant = None
+        enforce_eager = True
+    else:
+        tokenizer_name = get_tokenizer_name(model_path)
+        config_quant_method = _detect_hf_config_quant_method(model_path)
+        vllm_quant = None if config_quant_method else quant_method
 
-    if max_thinking_tokens is not None:
-        if (
-            not isinstance(max_thinking_tokens, int)
-            or max_thinking_tokens < 0
-        ):
-            raise ValueError(
-                "max_thinking_tokens must be a non-negative integer or null; "
-                f"received {max_thinking_tokens!r}."
-            )
-
-    tokenizer_name = get_tokenizer_name(model_path)
     if not tokenizer_name:
         raise ValueError(
             f"Could not determine a tokenizer for model {model_path!r}. "
-            "Provide a model repository with base_model metadata or update "
+            "Provide Hugging Face base_model metadata or update "
             "get_tokenizer_name()."
         )
 
-    config_quant = _detect_hf_config_quant_method(model_path)
-    vllm_quant = None if config_quant else quant_method
-
     selected_processors = select_server_logits_processors(
         use_output_guide=use_output_guide,
-        max_thinking_tokens=max_thinking_tokens,
     )
 
-    # The YAML list is validated, not used as the source of truth.
-    # Runtime selection must remain deterministic and must never register
-    # both the old and the adapter processors at the same time.
     if logits_processors is not None:
         requested_processors = set(logits_processors)
+        expected_processors = set(selected_processors)
         allowed_processors = {THINKING_JSON_ADAPTER_PROCESSOR}
-
         unsupported_processors = requested_processors - allowed_processors
+
         if unsupported_processors:
             raise ValueError(
-                "Unsupported custom logits processor(s) configured: "
-                f"{sorted(unsupported_processors)}.\n"
-                "Use only:\n"
-                f"  - {THINKING_JSON_ADAPTER_PROCESSOR}"
+                "Unsupported custom logits processor(s): "
+                f"{sorted(unsupported_processors)}. Only "
+                f"{THINKING_JSON_ADAPTER_PROCESSOR!r} is supported."
             )
-
-        expected_processors = set(selected_processors)
 
         if requested_processors != expected_processors:
             raise ValueError(
-                "Configured logits_processors does not match the required "
-                "runtime processor selection.\n"
-                f"Configured: {sorted(requested_processors)}\n"
-                f"Required:   {sorted(expected_processors)}\n"
-                "For use_output_guide=true, configure exactly "
-                "ThinkingJSONAdapterProcessor. For false, configure no "
-                "custom processors."
+                "Configured logits_processors does not match required runtime "
+                f"selection. Configured={sorted(requested_processors)}, "
+                f"required={sorted(expected_processors)}."
             )
-
-    if use_output_guide and selected_processors != [
-        THINKING_JSON_ADAPTER_PROCESSOR
-    ]:
-        raise RuntimeError(
-            "Invariant failure: guided server requests must register exactly "
-            "ThinkingJSONAdapterProcessor."
-        )
-
-    if not use_output_guide and selected_processors:
-        raise RuntimeError(
-            "Invariant failure: processors selected while "
-            "use_output_guide=False."
-        )
 
     print(
         "vLLM server custom-guidance configuration: "
         f"use_output_guide={use_output_guide}, "
-        f"max_thinking_tokens={max_thinking_tokens}, "
         f"logits_processors={selected_processors or 'none'}"
     )
 
     if port is None:
         port = find_free_port()
 
-    cmd = [
+    command = [
         sys.executable,
         "-m",
         "vllm.entrypoints.openai.api_server",
     ]
 
-    params = {
+    parameters: dict[str, Any] = {
         "--host": host,
         "--port": port,
-        "--model": model_path,
+        "--model": served_model_path,
         "--tokenizer": tokenizer_name,
         "--tensor-parallel-size": num_gpus_to_use,
         "--reasoning-parser": reasoning_parser,
@@ -287,26 +276,23 @@ def _load_model_vllm_server(
         "--enforce-eager": enforce_eager,
     }
 
-    for key, value in params.items():
+    for key, value in parameters.items():
         if value is None or value is False:
             continue
 
-        cmd.append(key)
-
+        command.append(key)
         if isinstance(value, bool):
             continue
-
         if isinstance(value, (list, tuple)):
-            cmd.extend(str(item) for item in value)
+            command.extend(str(item) for item in value)
         else:
-            cmd.append(str(value))
+            command.append(str(value))
 
     base_url = f"http://{host}:{port}"
-
     print("Launching vLLM command:")
-    print(" ".join(cmd))
+    print(" ".join(command))
 
-    server_process = subprocess.Popen(cmd)
+    server_process = subprocess.Popen(command)
     print(f"\nStarting vLLM server at {base_url}")
 
     try:
@@ -317,7 +303,6 @@ def _load_model_vllm_server(
         raise
 
     client_base_url = f"{base_url}/v1"
-
     if async_mode:
         client = AsyncOpenAI(
             base_url=client_base_url,
@@ -336,29 +321,31 @@ def _load_model_vllm_server(
 
 def _load_model_llama_cpp(
     model_path: str,
-    quant_scheme: str|None = None,
-    quant_method: str|None = None,
-    max_context_length: int|None = None,
+    quant_scheme: str | None = None,
+    quant_method: str | None = None,
+    max_context_length: int | None = None,
     use_flash_attention: bool = False,
-    *args, **kwargs
-):
-    """
-    Load a model using the llama-cpp backend
-    """
+    *args: Any,
+    **kwargs: Any,
+) -> Llama:
+    """Load a GGUF model through llama-cpp-python."""
     if Llama is None:
         raise ImportError(
-            "llama-cpp-python package is not installed in this environment.\n"
-            "Install it via: `uv pip install llama-cpp-python`"
+            "llama-cpp-python is not installed. Install it with "
+            "`uv pip install llama-cpp-python`."
         )
 
-    # Quantization method check
     if quant_method != "gguf":
-        raise ValueError(f"Llama-cpp does not support format {quant_method}")
+        raise ValueError(
+            f"llama-cpp requires a GGUF model, received quant_method={quant_method!r}."
+        )
+    if not quant_scheme:
+        raise ValueError("quant_scheme is required for llama-cpp GGUF loading.")
 
     return Llama.from_pretrained(
         repo_id=model_path,
         filename=f"*{quant_scheme}.gguf",
-        n_gpu_layers=-1,  # 0 for not using GPU
+        n_gpu_layers=-1,
         n_ctx=max_context_length,
         flash_attn=use_flash_attention,
         verbose=False,
@@ -372,46 +359,40 @@ def load_model(
     reasoning_parser: str | None = None,
     logits_processors: list[str] | None = None,
     use_output_guide: bool = False,
-    max_thinking_tokens: int | None = None,
     max_context_length: int | None = None,
     max_concurrent_inferences: int | None = None,
     use_flash_attention: bool = False,
     num_gpus_to_use: int | None = None,
     gpu_memory_utilization: float = 0.9,
     enforce_eager: bool = True,
-    *args,
-    **kwargs,
+    *args: Any,
+    **kwargs: Any,
 ) -> tuple[Any, subprocess.Popen | None]:
-    """
-    Create the requested inference backend with one unambiguous
-    structured-output mechanism.
-    """
+    """Load the configured model/backend without legacy reasoning-budget args."""
     model_path = model_path.strip().strip("'").strip('"').rstrip("\\").rstrip("/")
 
+    available_gpus = torch.cuda.device_count()
     if num_gpus_to_use is None:
-        num_gpus_to_use = torch.cuda.device_count()
-        print(f"Selected all available GPUs by default ({num_gpus_to_use})")
+        num_gpus_to_use = available_gpus
+        print(f"Selected all available GPUs by default ({num_gpus_to_use}).")
 
-    max_num_gpus = torch.cuda.device_count()
-    if num_gpus_to_use > max_num_gpus:
-        print("Warning: selected number of GPUs exceeds available GPUs.")
-        num_gpus_to_use = max_num_gpus
-
-    if inference_backend == "vllm" and max_thinking_tokens is not None:
-        raise ValueError(
-            "max_thinking_tokens requires vllm-serve or vllm-serve-async. "
-            "The direct vllm backend does not register custom "
-            "ThinkingBudgetProcessor instances."
+    if num_gpus_to_use < 1:
+        raise RuntimeError(
+            "No CUDA GPU selected. Use llama-cpp or mock, or configure a "
+            "vLLM-capable CUDA environment."
         )
+
+    if num_gpus_to_use > available_gpus:
+        print("Warning: selected GPU count exceeds available GPUs.")
+        num_gpus_to_use = available_gpus
 
     if inference_backend == "vllm" and logits_processors:
         print(
-            "Note: direct vllm uses native StructuredOutputsParams only; "
-            "configured custom logits processors are intentionally ignored."
+            "Note: direct vLLM uses native StructuredOutputsParams; configured "
+            "server logits processors are ignored."
         )
 
     quant_method = extract_quant_method(model_path)
-
     load_args = {
         "model_path": model_path,
         "quant_scheme": quant_scheme,
@@ -419,7 +400,6 @@ def load_model(
         "reasoning_parser": reasoning_parser,
         "logits_processors": logits_processors,
         "use_output_guide": use_output_guide,
-        "max_thinking_tokens": max_thinking_tokens,
         "max_concurrent_inferences": max_concurrent_inferences,
         "max_context_length": max_context_length,
         "num_gpus_to_use": num_gpus_to_use,
@@ -428,73 +408,69 @@ def load_model(
         "enforce_eager": enforce_eager,
     }
 
-    server_process = None
+    server_process: subprocess.Popen | None = None
 
     match inference_backend:
         case "vllm":
             model = _load_model_vllm(**load_args)
-
         case "vllm-serve":
             model, server_process = _load_model_vllm_server(**load_args)
-
         case "vllm-serve-async":
             model, server_process = _load_model_vllm_server(
                 async_mode=True,
                 **load_args,
             )
-
         case "llama-cpp":
             model = _load_model_llama_cpp(**load_args)
-
         case "mock":
             model = _load_model_mock(**load_args)
-
         case _:
             raise ValueError(f"Unknown inference backend: {inference_backend}")
 
     return model, server_process
 
 
-def _load_model_mock(*args, **kwargs):
-    """Load mock model for fast offline testing."""
+def _load_model_mock(*args: Any, **kwargs: Any) -> tuple[str, None]:
+    """Load an offline mock backend."""
     print("Mock inference backend initialized.")
-    return ("mock_model", None)
+    return "mock_model", None
 
 
 def get_tokenizer_name(
     model_id: str,
-    chat_template_required: bool=True,
-    default_tokenizer_name: str="Qwen/Qwen3-8B",
-) -> str:
-    """
-    Identify base model from which any model was quantized, in order to load
-    the correct tokenizer
-    """
-    # Look for base model in the "cardData" (where model tree info is stored)
+    chat_template_required: bool = True,
+    default_tokenizer_name: str = "Qwen/Qwen3-8B",
+) -> str | None:
+    """Resolve the base tokenizer name declared by a quantized model repository."""
     api = HfApi()
     model_info = api.model_info(model_id)
     card_data = model_info.card_data or {}
     tokenizer_name = card_data.get("base_model")
-    if isinstance(tokenizer_name, list):  # sometimes a list?
-        tokenizer_name = tokenizer_name[0]
 
-    # Alternatively, inspect tags or siblings
+    if isinstance(tokenizer_name, list):
+        tokenizer_name = tokenizer_name[0] if tokenizer_name else None
+
     if not tokenizer_name:
-        for tag in model_info.tags:
-            if "base_model:" in tag:
-                tokenizer_name = tag.split(":")[1]
+        for tag in model_info.tags or []:
+            if tag.startswith("base_model:"):
+                tokenizer_name = tag.split(":", maxsplit=1)[1]
                 break
 
-    # Check for chat template, may fall back on Llama-3.2-3B-Instruct (most common)
-    if chat_template_required and tokenizer_name:
+    if not tokenizer_name:
+        return None
+
+    if chat_template_required:
         try:
-            tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+            tokenizer = AutoTokenizer.from_pretrained(
+                tokenizer_name,
+                trust_remote_code=True,
+            )
             if tokenizer.chat_template is None:
                 raise ValueError("chat_template missing")
-        except Exception as e:
+        except Exception as exc:
             warn(
-                f"The tokenizer '{tokenizer_name}' does not support chat templating "
-                f"(reason: {e}). Falling back to '{default_tokenizer_name}'."
+                f"Tokenizer {tokenizer_name!r} has no usable chat template "
+                f"({exc}); using {default_tokenizer_name!r}."
             )
             return default_tokenizer_name
 
@@ -502,177 +478,155 @@ def get_tokenizer_name(
 
 
 def download_gguf_by_quant(model_id: str, quant_scheme: str) -> str:
-    """
-    Orchestrates the download of GGUF files. If split files are detected,
-    downloads all parts and calls the merge function.
-    """
+    """Download the requested GGUF quantization and merge split shards if needed."""
     quant_scheme_lower = quant_scheme.lower()
-    files = list_repo_files(model_id)
-    
-    # Identify the primary file
-    target_file = None
-    for file in files:
-        file_lower = file.lower()
-        if file_lower.endswith(".gguf") and quant_scheme_lower in file_lower:
-            # Prioritize part 1 of a split set
-            if "00001-of-" in file_lower:
-                target_file = file
-                break
-            if target_file is None:
-                target_file = file
+    target_file: str | None = None
+
+    for file_name in list_repo_files(model_id):
+        file_name_lower = file_name.lower()
+        if not file_name_lower.endswith(".gguf"):
+            continue
+        if quant_scheme_lower not in file_name_lower:
+            continue
+
+        if "00001-of-" in file_name_lower:
+            target_file = file_name
+            break
+        if target_file is None:
+            target_file = file_name
 
     if target_file is None:
         raise FileNotFoundError(
-            f"No GGUF file found with quantization scheme '{quant_scheme}' in repo '{model_id}'"
+            f"No GGUF file matching quant_scheme={quant_scheme!r} was found "
+            f"in {model_id!r}."
         )
 
-    # Check for split files and return single path if existing
-    split_match = re.search(r"^(.*)-(\d{5})-of-(\d{5})\.gguf$", target_file)
-    if not split_match:
-        print(f"Detected single GGUF file: {target_file}")
+    split_match = re.search(
+        r"^(.*)-(\d{5})-of-(\d{5})\.gguf$",
+        target_file,
+    )
+
+    if split_match is None:
+        print(f"Downloading GGUF file: {target_file}")
         return hf_hub_download(repo_id=model_id, filename=target_file)
-    
-    # Handle split download
+
     base_name = split_match.group(1)
     total_parts = int(split_match.group(3))
-    print(f"Detected split GGUF model ({total_parts} parts). Downloading...")
+    print(f"Downloading split GGUF model with {total_parts} shards.")
+
     first_part_path = hf_hub_download(repo_id=model_id, filename=target_file)
-    for i in range(2, total_parts + 1):
-        shard_name = f"{base_name}-{i:05d}-of-{total_parts:05d}.gguf"
-        print(f"Downloading part {i}/{total_parts}: {shard_name}")
+    for shard_index in range(2, total_parts + 1):
+        shard_name = (
+            f"{base_name}-{shard_index:05d}-of-{total_parts:05d}.gguf"
+        )
+        print(f"Downloading shard {shard_index}/{total_parts}: {shard_name}")
         hf_hub_download(repo_id=model_id, filename=shard_name)
 
-    # Merge all GGUF files into a single one, for vLLM
     return merge_gguf_shards(first_part_path)
 
 
 def merge_gguf_shards(first_part_path: str) -> str:
-    """
-    Merges split GGUF files using the installed 'gguf-split' CLI tool.
-    
-    Args:
-        first_part_path (str): Path to the first file (e.g., model-00001-of-00002.gguf)
-        
-    Returns:
-        str: The path to the successfully merged file.
-    """
-    # Construct the output filename (removing the split suffix)
+    """Merge local GGUF shards with the gguf-split command-line utility."""
     base_dir = os.path.dirname(first_part_path)
     original_filename = os.path.basename(first_part_path)
-    merged_filename = re.sub(r"-\d{5}-of-\d{5}", "", original_filename)
-    
-    # If regex didn't change anything (unexpected naming), append "-merged"
+    merged_filename = re.sub(
+        r"-\d{5}-of-\d{5}",
+        "",
+        original_filename,
+    )
+
     if merged_filename == original_filename:
-        merged_filename = f"{original_filename.replace('.gguf', '')}-merged.gguf"
-        
-    # If the merged file already exists, return it to save time
+        merged_filename = original_filename.replace(".gguf", "-merged.gguf")
+
     merged_path = os.path.join(base_dir, merged_filename)
     if os.path.exists(merged_path):
-        print(f"Found previously merged file: {merged_path}")
+        print(f"Using existing merged GGUF file: {merged_path}")
         return merged_path
 
-    # Usage: gguf-split --merge <first-split-file-path> <output-file-path>
-    print(f"Merging shards into: {merged_path}")
-    try:
-        cmd = ["gguf-split", "--merge", first_part_path, merged_path]
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        print(f"Merge successful! Single file built at {merged_path}")
-        return merged_path
-        
-    except FileNotFoundError:
-        raise RuntimeError("The 'gguf-split' tool was not found in the system PATH.\n")
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"gguf-split failed to merge files. Error: {e}")
+    command = ["gguf-split", "--merge", first_part_path, merged_path]
+    print(f"Merging GGUF shards into: {merged_path}")
 
-
-def download_model(model_id):
-    """
-    Download a model from the HuggingFaceHub to the local cache
-    """
-    # The snapshot_download function downloads all files from a repo
-    print(f"Downloading model {model_id} to the cache")
     try:
-        cached_path = snapshot_download(
-            repo_id=model_id,
-            repo_type="model",
-            local_files_only=False,
+        subprocess.run(
+            command,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
         )
-        print(f"Model downloaded successfully and cached at: {cached_path}")
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "The gguf-split command was not found in PATH."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"gguf-split failed to merge GGUF shards: {exc.stderr}"
+        ) from exc
 
-    except Exception as e:
-        print(f"An error occurred: {e}")
+    return merged_path
+
+
+def download_model(model_id: str) -> None:
+    """Download a Hugging Face model repository into the local cache."""
+    print(f"Downloading model {model_id!r} to the Hugging Face cache.")
+    snapshot_download(
+        repo_id=model_id,
+        repo_type="model",
+        local_files_only=False,
+    )
 
 
 def find_free_port() -> int:
-    """
-    Finds and returns an available, unused port on the host machine.
-    """
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        # Bind to port 0. The OS will assign a random available port.
-        s.bind(("", 0))
-        # Get the port number assigned by the OS.
-        port = s.getsockname()[1]
-        return port
+    """Ask the operating system for an available local TCP port."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as socket_handle:
+        socket_handle.bind(("", 0))
+        return socket_handle.getsockname()[1]
 
 
-def get_swap_space_gb(percentage=0.5, max=None):
-    """
-    Calculates the recommended vLLM swap space in GB based on a percentage
-    of the total available CPU RAM.
-    """
-    total_ram_bytes = psutil.virtual_memory().total
-    total_ram_gb = total_ram_bytes / (1024 ** 3) # Convert bytes to gigabytes
-    
-    # Calculate swap space and convert to an integer
-    swap_gb = int(total_ram_gb * percentage)
-    if max is not None and swap_gb > max:
-        swap_gb = max
-    
-    return swap_gb
+def get_swap_space_gb(
+    percentage: float = 0.5,
+    max_gb: int | None = None,
+) -> int:
+    """Return a RAM-based vLLM swap-space recommendation in GiB."""
+    total_ram_gb = psutil.virtual_memory().total / (1024**3)
+    swap_space_gb = int(total_ram_gb * percentage)
+
+    if max_gb is not None:
+        swap_space_gb = min(swap_space_gb, max_gb)
+
+    return swap_space_gb
 
 
 def wait_for_vllm_server_ready(
     server_process: subprocess.Popen,
     url: str,
     timeout: int = 1800,
-):
-    """
-    Waits for the vLLM server to be ready and become healthy
-    """
-    print("\nWaiting for server to become available (server logs coming below)")
+) -> None:
+    """Wait until the vLLM health and model-list endpoints are available."""
+    print("\nWaiting for vLLM server readiness.")
     start_time = time.time()
 
-    # Check if the server process terminated unexpectedly
     while time.time() - start_time < timeout:
         if server_process.poll() is not None:
             raise RuntimeError(
-                "\nvLLM server process terminated unexpectedly "
-                f"with exit code {server_process.returncode}.\n"
-                "Check the server logs above for the cause of the error."
+                "vLLM server terminated unexpectedly with exit code "
+                f"{server_process.returncode}."
             )
 
-        # Attempt to connect to the server's health endpoint
         try:
-            resp = httpx.get(f"{url}/health", timeout=1.0)
-            if resp.status_code == 200:
-
-                # Once healthy, double-check that the model is loaded and ready
-                model_resp = httpx.get(f"{url}/v1/models", timeout=2.0)
-                if model_resp.status_code == 200 and model_resp.json().get("data"):
-                    time.sleep(5)  # extra wait to ensure readiness
-                    return  # success, server is ready
-        
-        # Server is not yet available, wait and retry
+            health_response = httpx.get(f"{url}/health", timeout=1.0)
+            if health_response.status_code == 200:
+                model_response = httpx.get(f"{url}/v1/models", timeout=2.0)
+                if model_response.status_code == 200 and model_response.json().get("data"):
+                    time.sleep(5)
+                    return
         except httpx.RequestError:
-            time.sleep(2)
-            continue
-        
+            pass
+
         time.sleep(2)
 
-    # If the loop completes, it means we've timed out
     server_process.terminate()
     server_process.wait()
     raise TimeoutError(
-        f"\nvLLM server failed to start within {timeout} seconds.\n"
-        "Check the server logs above for the cause of the error."
+        f"vLLM server did not become ready within {timeout} seconds."
     )

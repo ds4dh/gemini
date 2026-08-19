@@ -295,9 +295,29 @@ def run_model(
             raise RuntimeError("No records to process and no existing results CSV found.")
     else:
         # Run inference incrementally in chunks
-        chunk_size = cfg.get("save_chunk_size", 10) or 10
-        infer_cfg = {k: v for k, v in cfg.items() if k not in ("model", "dataset")}
+        infer_cfg: dict[str, Any] = {
+            "inference_backend": cfg["inference_backend"],
+            "n_inference_repeats": cfg["n_inference_repeats"],
+            "reasoning_config": cfg["model"]["reasoning"],
+            "model_path": cfg["model_path"],
+            "use_output_guide": cfg["use_output_guide"],
+            "output_schema_name": cfg.get("output_schema_name"),
+            "max_new_tokens": cfg["max_new_tokens"],
+            "temperature": cfg["temperature"],
+            "top_p": cfg["top_p"],
+            "top_k": cfg["top_k"],
+            "min_p": cfg["min_p"],
+            "presence_penalty": cfg["presence_penalty"],
+            "repetition_penalty": cfg["repetition_penalty"],
+            "max_concurrent_requests": cfg["max_concurrent_requests"],
+            "max_context_length": cfg.get("max_context_length"),
+        }
+        if cfg.get("schema_config") is not None:
+            infer_cfg["schema_config"] = cfg["schema_config"]
+        elif cfg.get("schema") is not None:
+            infer_cfg["schema"] = cfg["schema"]
 
+        chunk_size = cfg.get("save_chunk_size", 100)
         print(f"\nRunning extraction pipeline in incremental chunks of {chunk_size} ({cfg['inference_backend']} backend)...")
         for i in range(0, num_samples, chunk_size):
             chunk_end = min(i + chunk_size, num_samples)
@@ -305,11 +325,11 @@ def run_model(
 
             chunk_dataset = dataset.select(range(i, chunk_end))
             chunk_with_outputs = process_samples(model=model, dataset=chunk_dataset, **infer_cfg)
+            
             df_chunk: pd.DataFrame = chunk_with_outputs.to_pandas()
-
-            # Append chunk to disk immediately
             header_needed = not os.path.exists(chunks_csv_path)
             df_chunk.to_csv(chunks_csv_path, mode="a", index=False, header=header_needed)
+
             print(f"  Saved chunk [{i + 1}..{chunk_end}] to {chunks_csv_path}")
 
         # Combine all processed records into final detailed CSV

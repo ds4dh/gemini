@@ -1,8 +1,9 @@
 import json
 import math
-from dataclasses import dataclass
-from enum import Enum, auto
 from typing import Any
+from enum import Enum, auto
+from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import torch
@@ -25,7 +26,7 @@ class GenerationPhase(Enum):
     FINAL_JSON = auto()
 
 
-def _ends_with(token_ids: list[int], suffix: list[int]) -> bool:
+def _ends_with_token_ids(token_ids: list[int], suffix: list[int]) -> bool:
     return (
         len(token_ids) >= len(suffix)
         and token_ids[-len(suffix):] == suffix
@@ -59,7 +60,6 @@ class ThinkingJSONRequestProcessor:
     AdapterLogitsProcessor supplies this callable with the actual current
     output_ids list at every decoding step.
     """
-
     matcher: Any
     vocab_size: int
     compressed_vocab_size: int
@@ -67,12 +67,14 @@ class ThinkingJSONRequestProcessor:
     think_end_token_ids: list[int]
     enable_thinking: bool
     max_thinking_tokens: int | None
+    tokenizer: PreTrainedTokenizer
     verbose_level: int = 1
 
     processed_len: int = 0
     thinking_tokens_generated: int = 0
     phase: GenerationPhase = GenerationPhase.THINKING
     force_started_at: int | None = None
+    _generated_output_ids: list[int] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.enable_thinking:
@@ -90,6 +92,7 @@ class ThinkingJSONRequestProcessor:
         output_ids contains all tokens already emitted for this request.
         logits contains the next-token distribution for this request.
         """
+        self._generated_output_ids = list(output_ids)
         self._consume_new_output_tokens(output_ids)
 
         if self.phase == GenerationPhase.THINKING:
@@ -109,61 +112,82 @@ class ThinkingJSONRequestProcessor:
         self._apply_json_grammar_mask(logits)
         return logits
 
-    def _consume_new_output_tokens(self, output_ids: list[int]) -> None:
-        """
-        Advance thinking or JSON state using emitted tokens not previously seen.
-        """
+    def _consume_new_output_tokens(
+        self,
+        output_ids: list[int],
+    ) -> None:
+        """Advance reasoning and JSON state for newly emitted output tokens."""
         if len(output_ids) <= self.processed_len:
             return
 
         new_tokens = output_ids[self.processed_len:]
-        self.processed_len = len(output_ids)
 
         for token_id in new_tokens:
             if token_id < 0:
+                self.processed_len += 1
                 continue
 
+            self.processed_len += 1
+
             if self.phase == GenerationPhase.THINKING:
-                self._consume_thinking_token(output_ids, token_id)
+                self._consume_thinking_token(output_ids)
+                continue
 
-            elif self.phase == GenerationPhase.FINAL_JSON:
-                accepted = self.matcher.accept_token(token_id)
+            accepted = self.matcher.accept_token(token_id)
 
-                if not accepted and self.verbose_level > 0:
-                    print(
-                        "Warning: generated token was rejected by the "
-                        f"JSON grammar: token_id={token_id}, "
-                        f"decoded_position={self.processed_len}"
-                    )
+            if accepted:
+                continue
+
+            decoded_token = self.tokenizer.decode(
+                [token_id],
+                skip_special_tokens=False,
+            )
+
+            if self.verbose_level > 0:
+                print(
+                    "Warning: token emitted after reasoning end was rejected by "
+                    "the JSON grammar. Resetting grammar state so the next token "
+                    f"must begin a fresh JSON object. token_id={token_id}, "
+                    f"token={decoded_token!r}, "
+                    f"decoded_position={self.processed_len}"
+                )
+
+            # The token already exists in the raw output, so it cannot be removed.
+            # Resetting prevents a rejected token from poisoning the matcher state.
+            # The next constrained step must start a new valid JSON object.
+            self.matcher.reset()
 
     def _consume_thinking_token(
         self,
         output_ids: list[int],
-        token_id: int,
     ) -> None:
-        """
-        Count reasoning tokens and detect a natural or forced </think>.
-        """
-        if _ends_with(output_ids[:self.processed_len], self.think_end_token_ids):
+        """Count thought tokens and enter JSON phase after the configured marker."""
+        if (
+            self.think_end_token_ids
+            and _ends_with_token_ids(
+                output_ids[:self.processed_len],
+                self.think_end_token_ids,
+            )
+        ):
             if self.verbose_level > 1:
                 print(
-                    "Custom processor: detected </think>; "
+                    "Custom processor detected thought end; "
                     "activating JSON grammar."
                 )
+
             self.phase = GenerationPhase.FINAL_JSON
             self.matcher.reset()
             return
 
         self.thinking_tokens_generated += 1
 
+
     def _next_forced_think_end_token(
         self,
         output_ids: list[int],
     ) -> int | None:
         """
-        Return the next </think> token to force, or None when unconstrained.
-
-        Supports both one-token and multi-token </think> representations.
+        Return the next configured thought-end token to force.
         """
         if self.max_thinking_tokens is None:
             return None
@@ -198,36 +222,70 @@ class ThinkingJSONRequestProcessor:
         logits.fill_(float("-inf"))
         logits[token_id] = original_logit
 
-    def _apply_json_grammar_mask(self, logits: torch.Tensor) -> None:
-        """
-        Generate and apply an XGrammar next-token mask for this request.
-        """
-        bitmask_np = np.full(
-            (1, self.compressed_vocab_size),
-            -1,
-            dtype=np.int32,
-        )
-
-        self.matcher.fill_next_token_bitmask(
-            bitmask_np,
-            index=0,
-        )
-
-        logits_2d = logits.unsqueeze(0)
-
-        xgr.apply_token_bitmask_inplace(
-            logits=logits_2d,
-            bitmask=torch.from_numpy(bitmask_np).to(logits.device),
+    def _apply_json_grammar_mask(
+        self,
+        logits: torch.Tensor,
+    ) -> None:
+        """Apply XGrammar's official next-token mask for the current JSON state."""
+        bitmask = xgr.allocate_token_bitmask(
+            batch_size=1,
             vocab_size=self.vocab_size,
         )
 
-        if torch.isneginf(logits).all() and self.verbose_level > 0:
-            print(
-                "Warning: XGrammar masked every token for a request; "
-                "permitting EOS only."
+        self.matcher.fill_next_token_bitmask(
+            bitmask,
+            index=0,
+        )
+
+        xgr.apply_token_bitmask_inplace(
+            logits=logits.unsqueeze(0),
+            bitmask=bitmask.to(logits.device),
+            vocab_size=self.vocab_size,
+        )
+
+        if torch.isneginf(logits).all():
+            generated_text = self.tokenizer.decode(
+                self._generated_output_ids,
+                skip_special_tokens=False,
             )
-            logits.fill_(float("-inf"))
-            logits[self.eos_token_id] = 0.0
+
+            raise RuntimeError(
+                "XGrammar left no valid token after applying the JSON-schema "
+                f"mask. phase={self.phase.name}; "
+                f"processed_len={self.processed_len}; "
+                f"generated_text={generated_text!r}"
+            )
+
+    # def _apply_json_grammar_mask(self, logits: torch.Tensor) -> None:
+    #     """
+    #     Generate and apply an XGrammar next-token mask for this request.
+    #     """
+    #     bitmask_np = np.full(
+    #         (1, self.compressed_vocab_size),
+    #         -1,
+    #         dtype=np.int32,
+    #     )
+
+    #     self.matcher.fill_next_token_bitmask(
+    #         bitmask_np,
+    #         index=0,
+    #     )
+
+    #     logits_2d = logits.unsqueeze(0)
+
+    #     xgr.apply_token_bitmask_inplace(
+    #         logits=logits_2d,
+    #         bitmask=torch.from_numpy(bitmask_np).to(logits.device),
+    #         vocab_size=self.vocab_size,
+    #     )
+
+    #     if torch.isneginf(logits).all() and self.verbose_level > 0:
+    #         print(
+    #             "Warning: XGrammar masked every token for a request; "
+    #             "permitting EOS only."
+    #         )
+    #         logits.fill_(float("-inf"))
+    #         logits[self.eos_token_id] = 0.0
 
 
 class ThinkingJSONAdapterProcessor(AdapterLogitsProcessor):
@@ -260,38 +318,24 @@ class ThinkingJSONAdapterProcessor(AdapterLogitsProcessor):
                 f"received {self.eos_token_id!r}."
             )
 
-        self.think_end_token_ids = self.tokenizer.encode(
-            "</think>",
-            add_special_tokens=False,
-        )
-        if not self.think_end_token_ids:
-            raise ValueError("Tokenizer cannot encode '</think>'.")
-
         self.xgr_tokenizer = xgr.TokenizerInfo.from_huggingface(
             self.tokenizer,
             vocab_size=self.vocab_size,
-            stop_token_ids=[self.eos_token_id],
         )
         self.xgr_compiler = xgr.GrammarCompiler(self.xgr_tokenizer)
 
         self.verbose_level = verbose_level
         if self.verbose_level > 0:
-            print(
-                "ThinkingJSONAdapterProcessor initialized: "
-                f"vocab_size={self.vocab_size}, "
-                f"think_end_token_ids={self.think_end_token_ids}"
-            )
+            print("ThinkingJSONAdapterProcessor initialized.")
 
     def new_req_logits_processor(
         self,
         params: SamplingParams,
     ) -> ThinkingJSONRequestProcessor | None:
-        """
-        Create one isolated request-level processor from vLLM request metadata.
-        """
+        """Create isolated JSON-grammar and reasoning-budget state per request."""
         extra_args = params.extra_args or {}
 
-        schema = extra_args.get("json_schema")
+        schema = extra_args.get("jsonschema")
         if schema is None:
             return None
 
@@ -300,7 +344,7 @@ class ThinkingJSONAdapterProcessor(AdapterLogitsProcessor):
 
         if not isinstance(schema, str):
             raise TypeError(
-                "json_schema must be a JSON string or dict; "
+                "jsonschema must be a JSON string or dictionary, "
                 f"received {type(schema).__name__}."
             )
 
@@ -308,23 +352,40 @@ class ThinkingJSONAdapterProcessor(AdapterLogitsProcessor):
             extra_args.get("enable_thinking", True),
             default=True,
         )
-
         max_thinking_tokens = extra_args.get("max_thinking_tokens")
+        think_end_marker = extra_args.get("think_end_marker")
+        think_end_token_ids: list[int] = []
+
+        if enable_thinking:
+            if not isinstance(think_end_marker, str) or not think_end_marker:
+                raise ValueError(
+                    "ThinkingJSONAdapterProcessor requires think_end_marker when "
+                    "enable_thinking=True."
+                )
+
+            think_end_token_ids = self.tokenizer.encode(
+                think_end_marker,
+                add_special_tokens=False,
+            )
+
+            if not think_end_token_ids:
+                raise ValueError(
+                    f"Tokenizer cannot encode think_end_marker={think_end_marker!r}."
+                )
 
         if max_thinking_tokens is not None:
             if (
                 not isinstance(max_thinking_tokens, int)
+                or isinstance(max_thinking_tokens, bool)
                 or max_thinking_tokens < 0
             ):
                 raise TypeError(
-                    "max_thinking_tokens must be a non-negative integer "
-                    f"or None; received {max_thinking_tokens!r}."
+                    "max_thinking_tokens must be a non-negative integer or None."
                 )
 
             if not enable_thinking:
                 raise ValueError(
-                    "max_thinking_tokens was supplied while "
-                    "enable_thinking=False."
+                    "max_thinking_tokens requires enable_thinking=True."
                 )
 
         try:
@@ -339,11 +400,13 @@ class ThinkingJSONAdapterProcessor(AdapterLogitsProcessor):
                 f"Could not compile JSON Schema with XGrammar: {exc}"
             ) from exc
 
-        if self.verbose_level > 2:
+        if self.verbose_level > 0:
             print(
-                "Creating custom per-request processor: "
+                "Creating ThinkingJSONRequestProcessor: "
                 f"enable_thinking={enable_thinking}, "
-                f"max_thinking_tokens={max_thinking_tokens}"
+                f"max_thinking_tokens={max_thinking_tokens}, "
+                f"think_end_marker={think_end_marker!r}, "
+                f"think_end_token_count={len(think_end_token_ids)}"
             )
 
         return ThinkingJSONRequestProcessor(
@@ -351,9 +414,11 @@ class ThinkingJSONAdapterProcessor(AdapterLogitsProcessor):
             vocab_size=self.vocab_size,
             compressed_vocab_size=self.compressed_vocab_size,
             eos_token_id=self.eos_token_id,
-            think_end_token_ids=self.think_end_token_ids,
+            think_end_token_ids=think_end_token_ids,
             enable_thinking=enable_thinking,
             max_thinking_tokens=max_thinking_tokens,
+            tokenizer=self.tokenizer,
+            verbose_level=self.verbose_level,
         )
 
     def is_argmax_invariant(self) -> bool:

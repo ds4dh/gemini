@@ -152,14 +152,14 @@ def extract_structured_output(
 
     # Attempt parsing each candidate (prioritizing post-think and final JSON candidates)
     for candidate in candidates:
-        # 1. Direct Pydantic parse
+        # Direct Pydantic parse
         try:
             validated_output = output_schema_model.model_validate_json(candidate)
             return validated_output.model_dump()
         except Exception:
             pass
 
-        # 2. Parse with lenient json5 library + Pydantic model validation
+        # Parse with lenient json5 library + Pydantic model validation
         try:
             data = json5.loads(candidate)
             if isinstance(data, dict):
@@ -168,7 +168,7 @@ def extract_structured_output(
         except Exception:
             pass
 
-        # 3. Attempt to repair truncated JSON
+        # Attempt to repair truncated JSON
         try:
             repaired_json = _repair_truncated_json(candidate)
             validated_output = output_schema_model.model_validate_json(repaired_json)
@@ -207,6 +207,9 @@ def extract_structured_output(
 
     if not extracted_data:
         print("Error: Could not extract any fields with regex. Returning default values.")
+        print("\n###########################")
+        print(f"Raw output was: {raw_output}")
+        print("###########################\n")
         return _get_default_values(output_schema_model)
 
     print(f"Success: Extracted partial data with regex: {list(extracted_data.keys())}")

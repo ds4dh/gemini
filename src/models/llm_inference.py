@@ -11,11 +11,42 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 from tqdm import tqdm
 from tqdm.asyncio import tqdm_asyncio
 
+from transformers import AutoTokenizer
 from vllm import LLM, RequestOutput, SamplingParams
 from vllm.sampling_params import StructuredOutputsParams
 from openai import AsyncOpenAI, InternalServerError, OpenAI
+
+from src.models.reasoning import ResolvedReasoning, resolve_reasoning
 from src.data.output_guiding import extract_structured_output, resolve_schema_model
 from src.data.prompting import build_prompt
+
+
+
+
+def _resolve_reasoning_for_tokenizer(
+    tokenizer: AutoTokenizer,
+    reasoning_config: dict[str, Any],
+) -> ResolvedReasoning:
+    """Resolve the canonical reasoning config against one tokenizer template."""
+    if not isinstance(reasoning_config, dict):
+        raise TypeError("reasoning_config must be a dictionary.")
+
+    return resolve_reasoning(
+        tokenizer=tokenizer,
+        enabled=reasoning_config["enabled"],
+        effort=reasoning_config["effort"],
+        preserve_thinking=reasoning_config["preserve_thinking"],
+    )
+
+
+
+def _load_server_tokenizer(model_name: str, model_path: str | None) -> AutoTokenizer:
+    """Load the tokenizer matching the server model for template inspection."""
+    tokenizer_source = model_path or model_name
+    return AutoTokenizer.from_pretrained(
+        tokenizer_source,
+        trust_remote_code=True,
+    )
 
 
 def _infer_vllm(
@@ -30,19 +61,30 @@ def _infer_vllm(
     presence_penalty: float = 0.0,
     repetition_penalty: float = 1.0,
     output_schema_model: Type[BaseModel] | None = None,
-    enable_thinking: bool = True,
-    max_thinking_tokens: int | None = None,
+    reasoning_config: dict[str, Any] | None = None,
     use_output_guide: bool = False,
     *args: Any,
     **kwargs: Any,
 ) -> list[list[str]]:
-    """Run direct vLLM inference with optional native JSON guidance."""
-    if max_thinking_tokens is not None:
+    """Run direct vLLM inference with template-aware reasoning controls."""
+    if reasoning_config is None:
+        raise ValueError("reasoning_config is required.")
+
+    hard_thinking_token_budget = reasoning_config[
+        "hard_thinking_token_budget"
+    ]
+    if hard_thinking_token_budget is not None:
         raise ValueError(
-            "max_thinking_tokens is supported only with "
+            "model.reasoning.hard_thinking_token_budget requires "
             "inference_backend='vllm-serve' or 'vllm-serve-async'. "
             "Direct vLLM does not register ThinkingJSONAdapterProcessor."
         )
+
+    tokenizer = model.get_tokenizer()
+    reasoning = _resolve_reasoning_for_tokenizer(
+        tokenizer=tokenizer,
+        reasoning_config=reasoning_config,
+    )
 
     structured_params = None
     if use_output_guide:
@@ -55,9 +97,10 @@ def _infer_vllm(
         )
 
     print(
-        "Direct vLLM output-guidance configuration: "
-        f"use_output_guide={use_output_guide}, "
-        f"native_structured_output={structured_params is not None}"
+        "Direct vLLM reasoning configuration: "
+        f"enable_thinking={reasoning.enable_thinking}, "
+        f"reasoning_effort={reasoning.reasoning_effort!r}, "
+        f"use_output_guide={use_output_guide}"
     )
 
     sampling_params = SamplingParams(
@@ -74,9 +117,9 @@ def _infer_vllm(
 
     tokenizer_fn = partial(
         build_prompt,
-        tokenizer=model.get_tokenizer(),
+        tokenizer=tokenizer,
+        reasoning=reasoning,
         add_generation_prompt=True,
-        enable_thinking=enable_thinking,
     )
     dataset = dataset.map(tokenizer_fn, desc="Building prompts for vLLM")
 
@@ -102,37 +145,62 @@ def _extract_outputs_vllm(choices: list[Any]) -> list[str]:
 
 def _setup_inference_output(
     output_schema_model: Type[BaseModel] | None,
-    enable_thinking: bool = True,
-    max_thinking_tokens: int | None = None,
-    use_output_guide: bool = True,
+    reasoning: ResolvedReasoning,
+    hard_thinking_token_budget: int | None,
+    use_output_guide: bool,
 ) -> tuple[None, dict[str, Any]]:
-    """Build server request options for ThinkingJSONAdapterProcessor.
+    """Build server request options from resolved reasoning capabilities."""
+    extra_body: dict[str, Any] = {}
 
-    The server-side adapter receives request-specific JSON-schema and bounded-
-    thinking settings through ``vllm_xargs``. The chat template receives the
-    model-level thinking toggle through ``chat_template_kwargs``.
-    """
-    extra_body: dict[str, Any] = {
-        "chat_template_kwargs": {
-            "enable_thinking": bool(enable_thinking),
-        }
-    }
+    # Direct vLLM prompt rendering needs reasoning_effort in template kwargs,
+    # but vLLM-server requests use the dedicated top-level API field below.
+    server_template_kwargs = dict(reasoning.chat_template_kwargs)
+    server_template_kwargs.pop("reasoning_effort", None)
+
+    if server_template_kwargs:
+        extra_body["chat_template_kwargs"] = server_template_kwargs
+
+    if reasoning.reasoning_effort is not None:
+        extra_body["reasoning_effort"] = reasoning.reasoning_effort
+
     vllm_xargs: dict[str, Any] = {}
-
-    if max_thinking_tokens is not None:
-        if not enable_thinking:
-            raise ValueError("max_thinking_tokens requires enable_thinking=True.")
-        vllm_xargs["max_thinking_tokens"] = max_thinking_tokens
 
     if use_output_guide:
         if output_schema_model is None:
             raise ValueError(
                 "use_output_guide=True requires a resolved output schema."
             )
-        vllm_xargs["json_schema"] = json.dumps(
+
+        if reasoning.enable_thinking and reasoning.think_end_marker is None:
+            raise ValueError(
+                "ThinkingJSONAdapterProcessor requires a known thought-end "
+                "marker when thinking is enabled."
+            )
+
+        vllm_xargs["jsonschema"] = json.dumps(
             output_schema_model.model_json_schema()
         )
-        vllm_xargs["enable_thinking"] = enable_thinking
+        vllm_xargs["enable_thinking"] = reasoning.enable_thinking
+
+        # Required both for a natural reasoning end and for a forced budget end.
+        if reasoning.enable_thinking:
+            vllm_xargs["think_end_marker"] = reasoning.think_end_marker
+
+    if hard_thinking_token_budget is not None:
+        if not use_output_guide:
+            raise ValueError(
+                "hard_thinking_token_budget requires use_output_guide=True."
+            )
+        if not reasoning.enable_thinking:
+            raise ValueError(
+                "hard_thinking_token_budget requires active thinking mode."
+            )
+        if reasoning.think_end_marker is None:
+            raise ValueError(
+                "hard_thinking_token_budget requires a known thought-end marker."
+            )
+
+        vllm_xargs["max_thinking_tokens"] = hard_thinking_token_budget
 
     if vllm_xargs:
         extra_body["vllm_xargs"] = vllm_xargs
@@ -179,19 +247,31 @@ def _infer_vllm_serve(
     presence_penalty: float = 0.0,
     repetition_penalty: float = 1.0,
     output_schema_model: Type[BaseModel] | None = None,
-    enable_thinking: bool = True,
-    max_thinking_tokens: int | None = None,
+    reasoning_config: dict[str, Any] | None = None,
     use_output_guide: bool = False,
+    model_path: str | None = None,
     *args: Any,
     **kwargs: Any,
 ) -> list[list[str]]:
-    """Run synchronous inference through the vLLM chat-completions server."""
+    """Run synchronous vLLM-server inference using canonical reasoning config."""
+    if reasoning_config is None:
+        raise ValueError("reasoning_config is required.")
+
     client = model
     model_name = client.models.list().data[0].id
+    tokenizer = _load_server_tokenizer(model_name, model_path)
+    reasoning = _resolve_reasoning_for_tokenizer(
+        tokenizer=tokenizer,
+        reasoning_config=reasoning_config,
+    )
+    hard_thinking_token_budget = reasoning_config[
+        "hard_thinking_token_budget"
+    ]
+
     response_format, base_extra_body = _setup_inference_output(
         output_schema_model=output_schema_model,
-        enable_thinking=enable_thinking,
-        max_thinking_tokens=max_thinking_tokens,
+        reasoning=reasoning,
+        hard_thinking_token_budget=hard_thinking_token_budget,
         use_output_guide=use_output_guide,
     )
     extra_body = _server_extra_body(
@@ -201,6 +281,13 @@ def _infer_vllm_serve(
         repetition_penalty=repetition_penalty,
         max_context_length=kwargs.get("max_context_length"),
         max_new_tokens=max_new_tokens,
+    )
+
+    print(
+        "vLLM server reasoning configuration: "
+        f"enable_thinking={reasoning.enable_thinking}, "
+        f"reasoning_effort={reasoning.reasoning_effort!r}, "
+        f"hard_thinking_token_budget={hard_thinking_token_budget}"
     )
 
     @retry(
@@ -227,7 +314,6 @@ def _infer_vllm_serve(
     for messages in tqdm(dataset["messages"], desc="Querying vLLM server"):
         all_outputs.append(generate_vllm_outputs(messages))
         time.sleep(1)
-
     return all_outputs
 
 
@@ -243,14 +329,17 @@ async def _infer_vllm_serve_async(
     presence_penalty: float = 0.0,
     repetition_penalty: float = 1.0,
     output_schema_model: Type[BaseModel] | None = None,
-    enable_thinking: bool = True,
-    max_thinking_tokens: int | None = None,
+    reasoning_config: dict[str, Any] | None = None,
     use_output_guide: bool = False,
     max_concurrent_requests: int = 64,
+    model_path: str | None = None,
     *args: Any,
     **kwargs: Any,
 ) -> list[list[str]]:
-    """Run bounded-concurrency inference through the vLLM chat server."""
+    """Run async vLLM-server inference using canonical reasoning config."""
+    if reasoning_config is None:
+        raise ValueError("reasoning_config is required.")
+
     client = AsyncOpenAI(
         base_url=str(model.base_url),
         api_key=model.api_key,
@@ -259,11 +348,20 @@ async def _infer_vllm_serve_async(
 
     try:
         model_name = (await client.models.list()).data[0].id
+        tokenizer = _load_server_tokenizer(model_name, model_path)
+        reasoning = _resolve_reasoning_for_tokenizer(
+            tokenizer=tokenizer,
+            reasoning_config=reasoning_config,
+        )
+        hard_thinking_token_budget = reasoning_config[
+            "hard_thinking_token_budget"
+        ]
         semaphore = asyncio.Semaphore(max_concurrent_requests)
+
         response_format, base_extra_body = _setup_inference_output(
             output_schema_model=output_schema_model,
-            enable_thinking=enable_thinking,
-            max_thinking_tokens=max_thinking_tokens,
+            reasoning=reasoning,
+            hard_thinking_token_budget=hard_thinking_token_budget,
             use_output_guide=use_output_guide,
         )
         extra_body = _server_extra_body(
@@ -375,8 +473,7 @@ def process_samples(
     dataset: Dataset,
     inference_backend: str,
     n_inference_repeats: int,
-    enable_thinking: bool = True,
-    max_thinking_tokens: int | None = None,
+    reasoning_config: dict[str, Any],
     output_schema_name: str | None = None,
     max_new_tokens: int = 512,
     temperature: float = 1.0,
@@ -385,10 +482,14 @@ def process_samples(
     min_p: float = 0.0,
     presence_penalty: float = 0.0,
     repetition_penalty: float = 1.0,
+    model_path: str | None = None,
     *args: Any,
     **kwargs: Any,
 ) -> Dataset:
-    """Run inference and attach raw and schema-validated outputs to a dataset."""
+    """Run inference and attach raw and schema-validated outputs."""
+    if not isinstance(reasoning_config, dict):
+        raise TypeError("reasoning_config must be a dictionary.")
+
     runtime_kwargs = dict(kwargs)
     use_output_guide = bool(runtime_kwargs.pop("use_output_guide", False))
     schema_arg = (
@@ -410,9 +511,9 @@ def process_samples(
         "presence_penalty": presence_penalty,
         "repetition_penalty": repetition_penalty,
         "output_schema_model": output_schema_model,
-        "enable_thinking": enable_thinking,
-        "max_thinking_tokens": max_thinking_tokens,
+        "reasoning_config": reasoning_config,
         "use_output_guide": use_output_guide,
+        "model_path": model_path,
         **runtime_kwargs,
     }
 
@@ -445,7 +546,10 @@ def process_samples(
             col_to_structure=column_name,
             inference_idx=inference_idx,
         )
-        dataset = dataset.map(mapping_fn, desc="Extracting model predictions")
+        dataset = dataset.map(
+            mapping_fn,
+            desc="Extracting model predictions",
+        )
 
     print("All LLM outputs were parsed.")
     return dataset

@@ -1,13 +1,21 @@
 from argparse import ArgumentParser
 import os
 import re
+import yaml
 import shutil
+import psutil
 import socket
 import sys
 
-import psutil
-import yaml
+from typing import Any
+from copy import deepcopy
 from huggingface_hub import scan_cache_dir
+
+THINKING_JSON_ADAPTER_PROCESSOR = (
+    "src.models.logits_processors:ThinkingJSONAdapterProcessor"
+)
+VALID_REASONING_EFFORTS = {"auto", "off", "low", "medium", "high", "xhigh"}
+
 
 
 def add_model_arguments(parser: ArgumentParser) -> None:
@@ -71,143 +79,329 @@ def add_data_arguments(parser: ArgumentParser) -> None:
     )
 
 
-def _load_config_from_yaml(config_file_path: str) -> dict:
-    """ Load configuration from a YAML file
-    
-    Args:
-        config_file_path (str): Path to the YAML
-    """
+def _load_config_from_yaml(config_file_path: str) -> dict[str, Any]:
+    """Load and validate one YAML configuration mapping."""
     try:
-        with open(config_file_path, "r") as f:
-            return yaml.safe_load(f)
-    except FileNotFoundError:
-        print(f"Error: Config file not found at {config_file_path}")
-        exit(1)
+        with open(config_file_path, "r", encoding="utf-8") as file:
+            config = yaml.safe_load(file) or {}
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"Configuration file not found: {config_file_path}"
+        ) from exc
+    except yaml.YAMLError as exc:
+        raise ValueError(
+            f"Invalid YAML configuration: {config_file_path}"
+        ) from exc
+
+    if not isinstance(config, dict):
+        raise TypeError(
+            f"Configuration root must be a YAML mapping: {config_file_path}"
+        )
+
+    return config
 
 
-def load_config_files(script_args) -> dict:
-    """ Load configurations from split YAML files:
-        1. Run configuration (default: configs/run_cfg.yaml or script_args.run_config).
-        2. Extraction configuration (specified by script_args.extraction_config CLI argument,
-           or 'extraction_config_path' inside run_cfg.yaml,
-           defaulting to configs/extraction_cfgs/extraction_cfg.yaml).
-        Fallback to single unified YAML file if specified via script_args.config.
+def _deep_merge_config(
+    base: dict[str, Any],
+    override: dict[str, Any],
+) -> dict[str, Any]:
+    """Recursively merge config dictionaries; override takes precedence."""
+    merged = deepcopy(base)
+
+    for key, override_value in override.items():
+        base_value = merged.get(key)
+
+        if isinstance(base_value, dict) and isinstance(override_value, dict):
+            merged[key] = _deep_merge_config(base_value, override_value)
+        else:
+            merged[key] = deepcopy(override_value)
+
+    return merged
+
+
+def load_config_files(script_args) -> dict[str, Any]:
     """
-    # Check if an explicit single unified config file path is provided via --config
-    single_config_path = getattr(script_args, "config", None) or getattr(script_args, "config_path", None)
+    Load either a unified YAML configuration or a run configuration plus
+    an extraction configuration, then normalize the combined result.
+    """
+    single_config_path = (
+        getattr(script_args, "config", None)
+        or getattr(script_args, "config_path", None)
+    )
 
-    if single_config_path and os.path.exists(single_config_path):
+    if single_config_path:
         print(f"Loading unified configuration from: {single_config_path}")
-        raw_cfg = _load_config_from_yaml(single_config_path)
-        return normalize_pipeline_config(raw_cfg)
+        return normalize_pipeline_config(
+            _load_config_from_yaml(single_config_path)
+        )
 
-    # 1. Determine and load run configuration
-    run_config_path = getattr(script_args, "run_config", None) or getattr(script_args, "run_config_path", None) or "configs/run_cfg.yaml"
-    run_cfg = _load_config_from_yaml(run_config_path) if os.path.exists(run_config_path) else {}
-    if os.path.exists(run_config_path):
-        print(f"Loading run configuration from: {run_config_path}")
-    else:
-        print(f"Warning: Run configuration file not found at: {run_config_path}")
+    run_config_path = (
+        getattr(script_args, "run_config", None)
+        or getattr(script_args, "run_config_path", None)
+        or "configs/run_cfg.yaml"
+    )
 
-    # 2. Determine and load extraction configuration
-    # CLI arg overrides run_cfg setting (under data: or top-level), which overrides default path
-    cli_extraction_path = getattr(script_args, "extraction_config", None) or getattr(script_args, "extraction_config_path", None)
-    if cli_extraction_path:
-        extraction_config_path = cli_extraction_path
-    elif run_cfg.get("data", {}).get("extraction_config_path"):
-        extraction_config_path = run_cfg["data"]["extraction_config_path"]
-    elif "extraction_config_path" in run_cfg:
-        extraction_config_path = run_cfg["extraction_config_path"]
-    else:
-        extraction_config_path = "configs/extraction_cfgs/mrs_score.yaml"
+    print(f"Loading run configuration from: {run_config_path}")
+    run_cfg = _load_config_from_yaml(run_config_path)
 
-    extraction_cfg = _load_config_from_yaml(extraction_config_path) if os.path.exists(extraction_config_path) else {}
-    if os.path.exists(extraction_config_path):
-        print(f"Loading extraction configuration from: {extraction_config_path}")
-    else:
-        print(f"Warning: Extraction configuration file not found at: {extraction_config_path}")
+    cli_extraction_path = (
+        getattr(script_args, "extraction_config", None)
+        or getattr(script_args, "extraction_config_path", None)
+    )
 
-    merged_cfg = {**run_cfg, **extraction_cfg}
+    extraction_config_path = (
+        cli_extraction_path
+        or run_cfg.get("data", {}).get("extraction_config_path")
+        or run_cfg.get("extraction_config_path")
+        or "configs/extraction_cfgs/mrs_score.yaml"
+    )
+
+    print(f"Loading extraction configuration from: {extraction_config_path}")
+    extraction_cfg = _load_config_from_yaml(extraction_config_path)
+
+    merged_cfg = _deep_merge_config(run_cfg, extraction_cfg)
     merged_cfg["_active_run_config_path"] = run_config_path
     merged_cfg["_active_extraction_config_path"] = extraction_config_path
 
     return normalize_pipeline_config(merged_cfg)
 
 
-def normalize_pipeline_config(raw_cfg: dict) -> dict:
+def normalize_pipeline_config(raw_cfg: dict[str, Any]) -> dict[str, Any]:
     """
-    Normalizes and flattens unified or legacy configuration dicts so all modules
-    can access parameters reliably via top-level keys or nested sections.
+    Validate the nested configuration and expose non-reasoning model/data/output
+    values at top level for existing modules.
+
+    Reasoning remains canonical and nested at:
+        cfg["model"]["reasoning"]
     """
-    cfg = raw_cfg.copy()
+    cfg = deepcopy(raw_cfg)
 
-    # Extract nested sections if present
-    model_section = cfg.get("model", {})
-    data_section = cfg.get("data", {})
-    prompt_section = cfg.get("prompt", {})
-    output_section = cfg.get("output", {})
-    schema_section = cfg.get("schema", {})
+    model_section = cfg.get("model") or {}
+    data_section = cfg.get("data") or {}
+    prompt_section = cfg.get("prompt") or {}
+    output_section = cfg.get("output") or {}
 
-    # Flatten nested parameters into top-level dict for backwards compatibility
-    for section in (model_section, data_section, prompt_section, output_section):
-        if isinstance(section, dict):
-            for k, v in section.items():
-                if k not in cfg or cfg[k] is None:
-                    cfg[k] = v
+    for section_name, section in (
+        ("model", model_section),
+        ("data", data_section),
+        ("prompt", prompt_section),
+        ("output", output_section),
+    ):
+        if not isinstance(section, dict):
+            raise TypeError(
+                f"Configuration section '{section_name}' must be a mapping."
+            )
 
-    # Normalize prompt template structures
-    if "prompt_templates" not in cfg:
-        cfg["prompt_templates"] = {
-            "system_template": prompt_section.get("system_template") or cfg.get("system_template") or "{task_description}\n{domain_knowledge}\n{output_specifications}",
-            "user_template": prompt_section.get("user_template") or cfg.get("user_template") or "Voici le texte d'entrée:\nDEBUT DU TEXTE:\n{input_text}\nFIN DU TEXTE",
-        }
+    # Keep the nested sections intact.
+    cfg["model"] = model_section
+    cfg["data"] = data_section
+    cfg["prompt"] = prompt_section
+    cfg["output"] = output_section
 
-    if "context_data" not in cfg:
-        cfg["context_data"] = prompt_section.get("context_data") or cfg.get("context_data") or {
+    # Flatten non-reasoning values for existing modules that still expect them.
+    # Do not flatten model.reasoning: it remains model.reasoning only.
+    for key, value in model_section.items():
+        if key != "reasoning":
+            cfg.setdefault(key, value)
+
+    for section in (data_section, prompt_section, output_section):
+        for key, value in section.items():
+            cfg.setdefault(key, value)
+
+    # --------------------------------------------------------------------------
+    # Prompt configuration
+    # --------------------------------------------------------------------------
+    cfg.setdefault(
+        "prompt_templates",
+        {
+            "system_template": (
+                prompt_section.get("system_template")
+                or cfg.get("system_template")
+                or (
+                    "{task_description}\n"
+                    "{domain_knowledge}\n"
+                    "{output_specifications}"
+                )
+            ),
+            "user_template": (
+                prompt_section.get("user_template")
+                or cfg.get("user_template")
+                or (
+                    "Voici le texte d'entrée:\n"
+                    "DEBUT DU TEXTE:\n"
+                    "{input_text}\n"
+                    "FIN DU TEXTE"
+                )
+            ),
+        },
+    )
+
+    cfg.setdefault(
+        "context_data",
+        prompt_section.get("context_data")
+        or cfg.get("context_data")
+        or {
             "task_description": "Tu es un expert médical.",
             "domain_knowledge": "",
             "output_specifications": "",
-        }
+        },
+    )
 
-    # Normalize schema
-    if "schema" not in cfg and "output_schema_name" in cfg:
+    # --------------------------------------------------------------------------
+    # Schema configuration
+    # --------------------------------------------------------------------------
+    schema_value = cfg.get("schema")
+
+    if isinstance(schema_value, dict):
+        cfg["schema_config"] = schema_value
+
+        if "name" in schema_value:
+            cfg["output_schema_name"] = schema_value["name"]
+
+    elif schema_value is None and "output_schema_name" in cfg:
         cfg["schema"] = cfg["output_schema_name"]
-    elif "schema" in cfg:
-        cfg["schema_config"] = schema_section
-        if isinstance(schema_section, dict) and "name" in schema_section:
-            cfg["output_schema_name"] = schema_section["name"]
 
-    # Normalize default data loading arguments
-    if "data_loading_arguments" not in cfg:
-        cfg["data_loading_arguments"] = {
+    # --------------------------------------------------------------------------
+    # Data-loading configuration
+    # --------------------------------------------------------------------------
+    cfg.setdefault(
+        "data_loading_arguments",
+        {
             "use_curated_dataset": cfg.get("use_curated_dataset", False),
             "add_curated_dataset": cfg.get("add_curated_dataset", False),
-            "remove_samples_without_label": cfg.get("remove_samples_without_label", False),
-            "max_samples": cfg.get("max_samples", None),
-        }
+            "remove_samples_without_label": cfg.get(
+                "remove_samples_without_label",
+                False,
+            ),
+            "max_samples": cfg.get("max_samples"),
+        },
+    )
 
-    # Defaults for essential fields
+    # --------------------------------------------------------------------------
+    # General defaults
+    # --------------------------------------------------------------------------
     cfg.setdefault("result_dir", "./results")
     cfg.setdefault("resume_previous_run", True)
     cfg.setdefault("save_chunk_size", 100)
+
     cfg.setdefault("inference_backend", "vllm")
     cfg.setdefault("model_path", "Qwen/Qwen2.5-0.5B-Instruct")
     cfg.setdefault("quant_scheme", None)
+
     cfg.setdefault("n_inference_repeats", 1)
-    cfg.setdefault("enable_thinking", False)
-    cfg.setdefault("max_thinking_tokens", None)
+    cfg.setdefault("max_concurrent_requests", 1)
+    cfg.setdefault("max_concurrent_inferences", 1)
+
     cfg.setdefault("max_new_tokens", 512)
+    cfg.setdefault("max_context_length", None)
+
     cfg.setdefault("temperature", 0.1)
     cfg.setdefault("top_p", 0.9)
+    cfg.setdefault("top_k", 0)
+    cfg.setdefault("min_p", 0.0)
+    cfg.setdefault("presence_penalty", 0.0)
+    cfg.setdefault("repetition_penalty", 1.0)
+
     cfg.setdefault("use_output_guide", False)
     cfg.setdefault("delete_model_cache_after_run", False)
-    cfg.setdefault("logits_processors", [
-        "src.models.logits_processors:ThinkingBudgetProcessor",
-        "src.models.logits_processors:JSONParsingProcessor",
-    ])
+    cfg.setdefault("enforce_eager", False)
+
+    # --------------------------------------------------------------------------
+    # Canonical nested reasoning configuration
+    # --------------------------------------------------------------------------
+    reasoning = model_section.get("reasoning") or {}
+
+    if not isinstance(reasoning, dict):
+        raise TypeError("model.reasoning must be a mapping.")
+
+    normalized_reasoning = {
+        "enabled": reasoning.get("enabled", "auto"),
+        "effort": reasoning.get("effort", "auto"),
+        "preserve_thinking": reasoning.get("preserve_thinking", False),
+        "hard_thinking_token_budget": reasoning.get(
+            "hard_thinking_token_budget",
+            None,
+        ),
+    }
+
+    if normalized_reasoning["enabled"] not in (True, False, "auto"):
+        raise ValueError(
+            "model.reasoning.enabled must be true, false, or 'auto'."
+        )
+
+    if normalized_reasoning["effort"] not in VALID_REASONING_EFFORTS:
+        raise ValueError(
+            "model.reasoning.effort must be one of "
+            f"{sorted(VALID_REASONING_EFFORTS)}."
+        )
+
+    if not isinstance(normalized_reasoning["preserve_thinking"], bool):
+        raise TypeError(
+            "model.reasoning.preserve_thinking must be boolean."
+        )
+
+    hard_budget = normalized_reasoning["hard_thinking_token_budget"]
+
+    if hard_budget is not None and (
+        not isinstance(hard_budget, int)
+        or isinstance(hard_budget, bool)
+        or hard_budget < 0
+    ):
+        raise ValueError(
+            "model.reasoning.hard_thinking_token_budget must be a "
+            "non-negative integer or null."
+        )
+
+    if hard_budget is not None and cfg["max_new_tokens"] <= hard_budget:
+        raise ValueError(
+            "max_new_tokens must exceed "
+            "model.reasoning.hard_thinking_token_budget."
+        )
+
+    if (
+        hard_budget is not None
+        and cfg["inference_backend"] not in {
+            "vllm-serve",
+            "vllm-serve-async",
+        }
+    ):
+        raise ValueError(
+            "model.reasoning.hard_thinking_token_budget requires "
+            "inference_backend='vllm-serve' or "
+            "inference_backend='vllm-serve-async'."
+        )
+
+    cfg["model"]["reasoning"] = normalized_reasoning
+
+    # --------------------------------------------------------------------------
+    # Guided-output / custom processor validation
+    # --------------------------------------------------------------------------
+    if cfg["use_output_guide"]:
+        configured_processors = cfg.get("logits_processors")
+
+        if configured_processors is None:
+            cfg["logits_processors"] = [
+                THINKING_JSON_ADAPTER_PROCESSOR
+            ]
+
+        elif configured_processors != [THINKING_JSON_ADAPTER_PROCESSOR]:
+            raise ValueError(
+                "use_output_guide=True requires exactly "
+                f"[{THINKING_JSON_ADAPTER_PROCESSOR!r}] in "
+                "logits_processors."
+            )
+
+    else:
+        cfg["logits_processors"] = []
+
+    if hard_budget is not None and not cfg["use_output_guide"]:
+        raise ValueError(
+            "model.reasoning.hard_thinking_token_budget currently requires "
+            "use_output_guide=True because ThinkingJSONAdapterProcessor owns "
+            "the hard-cap logic."
+        )
 
     return cfg
-
 
 
 def extract_quant_method(
