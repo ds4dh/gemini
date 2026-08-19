@@ -3,13 +3,10 @@ import argparse
 import numpy as np
 import pandas as pd
 from datasets import Dataset
-from src.data.encryption import read_pandas_from_encrypted_file
 
 
 def load_data_formatted_for_benchmarking(
     cfg_args: argparse.Namespace = None,
-    use_curated_dataset: bool = False,
-    add_curated_dataset: bool = False,
     remove_samples_without_label: bool = False,
     max_samples: int | None = None,
     input_path: str = None,
@@ -34,27 +31,6 @@ def load_data_formatted_for_benchmarking(
             df_data = pd.read_parquet(direct_path)
         else:
             df_data = pd.read_csv(direct_path)
-
-    elif use_curated_dataset:
-        if add_curated_dataset:
-            raise ValueError(
-                "Cannot use both 'use_curated_dataset' and 'add_curated_dataset' "
-                "flags at the same time. Please choose one."
-            )
-        curated_path = getattr(cfg_args, "curated_data_path", "data/curated_dataset.csv")
-        print(f"Loading curated dataset from: {curated_path}")
-        df_data = pd.read_csv(curated_path)
-
-    elif getattr(cfg_args, "encrypted_data_path", None) and os.path.exists(getattr(cfg_args, "encrypted_data_path", "")):
-        print("Loading encrypted dataset...")
-        df_data = read_pandas_from_encrypted_file(
-            encrypted_file_path=cfg_args.encrypted_data_path,
-            encryption_key_var_name=getattr(cfg_args, "key_name", "GEMINI"),
-            hostname=getattr(cfg_args, "hostname", ""),
-            username=getattr(cfg_args, "username", ""),
-            remote_env_path=getattr(cfg_args, "remote_env_path", ""),
-            port=getattr(cfg_args, "port", 22),
-        )
 
     else:
         # Fallback search for synthetic or local default data

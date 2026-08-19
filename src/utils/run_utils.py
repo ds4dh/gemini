@@ -18,67 +18,6 @@ VALID_REASONING_EFFORTS = {"auto", "off", "low", "medium", "high", "xhigh"}
 
 
 
-def add_model_arguments(parser: ArgumentParser) -> None:
-    """ Parse and validate model arguments
-    """
-    model_group = parser.add_argument_group(
-        title="Model configuration",
-        description="Configuration options for model benchmarking and extraction",
-    )
-
-    model_group.add_argument(
-        "-rc", "--run-config",
-        default="configs/run_cfg.yaml",
-        help="Path to the primary run configuration file (default: configs/run_cfg.yaml)"
-    )
-
-    model_group.add_argument(
-        "-ec", "--extraction-config",
-        default=None,
-        help="Path to the specific extraction configuration file (optional override)"
-    )
-
-    model_group.add_argument(
-        "-c", "--config",
-        default=None,
-        help="Path to unified single configuration file (optional override)"
-    )
-
-
-def add_data_arguments(parser: ArgumentParser) -> None:
-    """
-    Add arguments required for dataset access.
-    """
-    data_group = parser.add_argument_group(
-        title="Data access configuration",
-        description="Arguments for local/remote dataset access and encryption."
-    )
-
-    data_group.add_argument(
-        "--encrypted-data-path",
-        "-ed",
-        type=str,
-        default="default_encrypted_data_path.encrypted.csv",
-        help="Path to the local encrypted data file.",
-    )
-
-    data_group.add_argument(
-        "--curated-data-path",
-        "-cd",
-        type=str,
-        default="default_non_encrypted_data_path.csv",
-        help="Path to the local non-encrypted data file.",
-    )
-
-    data_group.add_argument(
-        "--key-name",
-        "-kn",
-        type=str,
-        default="GEMINI",
-        help="Name of the encryption key variable in the .env file.",
-    )
-
-
 def _load_config_from_yaml(config_file_path: str) -> dict[str, Any]:
     """Load and validate one YAML configuration mapping."""
     try:
@@ -121,38 +60,22 @@ def _deep_merge_config(
 
 def load_config_files(script_args) -> dict[str, Any]:
     """
-    Load either a unified YAML configuration or a run configuration plus
-    an extraction configuration, then normalize the combined result.
+    Load the run configuration and extraction configuration YAML files,
+    merge them, and normalize the combined result.
     """
-    single_config_path = (
-        getattr(script_args, "config", None)
-        or getattr(script_args, "config_path", None)
-    )
-
-    if single_config_path:
-        print(f"Loading unified configuration from: {single_config_path}")
-        return normalize_pipeline_config(
-            _load_config_from_yaml(single_config_path)
-        )
-
     run_config_path = (
         getattr(script_args, "run_config", None)
-        or getattr(script_args, "run_config_path", None)
         or "configs/run_cfg.yaml"
     )
 
     print(f"Loading run configuration from: {run_config_path}")
     run_cfg = _load_config_from_yaml(run_config_path)
 
-    cli_extraction_path = (
-        getattr(script_args, "extraction_config", None)
-        or getattr(script_args, "extraction_config_path", None)
-    )
+    cli_extraction_path = getattr(script_args, "extraction_config", None)
 
     extraction_config_path = (
         cli_extraction_path
         or run_cfg.get("data", {}).get("extraction_config_path")
-        or run_cfg.get("extraction_config_path")
         or "configs/extraction_cfgs/mrs_score.yaml"
     )
 

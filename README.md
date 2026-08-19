@@ -192,9 +192,7 @@ python scripts/run_pipeline.py \
 | :--- | :--- | :--- |
 | `--run-config` | `-rc` | Path to run configuration YAML file (default: `configs/run_cfg.yaml`) |
 | `--extraction-config` | `-ec` | Path to extraction task YAML file |
-| `--config` | `-c` | Path to single unified configuration file |
-| `--input-path` | `-i` | Override path to input dataset CSV/Excel |
-| `--curated-data-path` | `-cd` | Override path to non-encrypted dataset CSV |
+| `--input-path` | `-i` | Override path to input dataset (CSV, Excel, Parquet) |
 | `--backend` | `-b` | Inference backend (`vllm`, `vllm-serve-async`, `vllm-serve`, `llama-cpp`, `mock`) |
 | `--model` | `-m` | Hugging Face model repository ID or local path |
 | `--quant-scheme` | `-qs` | GGUF quantization scheme override (e.g., `Q6_K_XL`, `Q8_0`) |

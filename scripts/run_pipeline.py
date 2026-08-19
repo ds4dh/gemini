@@ -33,8 +33,6 @@ def main() -> None:
     # Apply CLI argument overrides
     if args.input_path:
         cfg["input_path"] = args.input_path
-    if args.curated_data_path:
-        cfg["input_path"] = args.curated_data_path
     if args.backend:
         cfg["inference_backend"] = args.backend
     if args.model:
@@ -111,28 +109,10 @@ def parse_cli_args() -> argparse.Namespace:
         help="Path to extraction configuration YAML file (overrides extraction_config_path in run_cfg.yaml)",
     )
     parser.add_argument(
-        "--config", "-c",
-        type=str,
-        default=None,
-        help="Path to unified single configuration YAML file (optional override)",
-    )
-    parser.add_argument(
         "--input-path", "-i",
         type=str,
         default=None,
-        help="Override input dataset CSV/Excel path",
-    )
-    parser.add_argument(
-        "--curated-data-path", "-cd",
-        type=str,
-        default=None,
-        help="Path to non-encrypted curated dataset CSV",
-    )
-    parser.add_argument(
-        "--encrypted-data-path", "-ed",
-        type=str,
-        default=None,
-        help="Path to encrypted dataset CSV",
+        help="Override input dataset CSV/Excel/Parquet path",
     )
     parser.add_argument(
         "--backend", "-b",
@@ -240,8 +220,6 @@ def run_model(
             shutil.copyfile(rc_src, rc_dest)
         if ec_src and os.path.exists(ec_src):
             shutil.copyfile(ec_src, ec_dest)
-        if args.config and os.path.exists(args.config):
-            shutil.copyfile(args.config, os.path.join(run_dir, "config.yaml"))
 
         print(f"Saved config snapshots at: {run_dir}")
     except Exception as e:

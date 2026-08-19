@@ -25,7 +25,6 @@ while [[ $# -gt 0 ]]; do
         -n|--nodelist) NODE_LIST="$2"; shift 2 ;;
         -rc|--run-config) RUN_CONFIG="$2"; shift 2 ;;
         -ec|--extraction-config) EXTRACTION_CONFIG="$2"; shift 2 ;;
-        -c|--config) CONFIG_FILE="$2"; shift 2 ;;
         --model) MODEL_PATH="$2"; shift 2 ;;
         --quant-scheme) QUANT_SCHEME="$2"; shift 2 ;;
         --backend) INFERENCE_BACKEND="$2"; shift 2 ;;
