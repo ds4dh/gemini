@@ -256,37 +256,6 @@ class ThinkingJSONRequestProcessor:
                 f"generated_text={generated_text!r}"
             )
 
-    # def _apply_json_grammar_mask(self, logits: torch.Tensor) -> None:
-    #     """
-    #     Generate and apply an XGrammar next-token mask for this request.
-    #     """
-    #     bitmask_np = np.full(
-    #         (1, self.compressed_vocab_size),
-    #         -1,
-    #         dtype=np.int32,
-    #     )
-
-    #     self.matcher.fill_next_token_bitmask(
-    #         bitmask_np,
-    #         index=0,
-    #     )
-
-    #     logits_2d = logits.unsqueeze(0)
-
-    #     xgr.apply_token_bitmask_inplace(
-    #         logits=logits_2d,
-    #         bitmask=torch.from_numpy(bitmask_np).to(logits.device),
-    #         vocab_size=self.vocab_size,
-    #     )
-
-    #     if torch.isneginf(logits).all() and self.verbose_level > 0:
-    #         print(
-    #             "Warning: XGrammar masked every token for a request; "
-    #             "permitting EOS only."
-    #         )
-    #         logits.fill_(float("-inf"))
-    #         logits[self.eos_token_id] = 0.0
-
 
 class ThinkingJSONAdapterProcessor(AdapterLogitsProcessor):
     """
@@ -400,7 +369,7 @@ class ThinkingJSONAdapterProcessor(AdapterLogitsProcessor):
                 f"Could not compile JSON Schema with XGrammar: {exc}"
             ) from exc
 
-        if self.verbose_level > 0:
+        if self.verbose_level > 1:
             print(
                 "Creating ThinkingJSONRequestProcessor: "
                 f"enable_thinking={enable_thinking}, "
